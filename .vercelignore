@@ -1,0 +1,10 @@
+.env
+.env.*
+.git
+.firebase
+coverage
+docs
+test
+uploads
+*.md
+firebase-debug.log

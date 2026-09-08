@@ -42,6 +42,7 @@ const DEFAULT_ORIGINS = [
   'https://shuttlez-landing.firebaseapp.com',
   'https://shuttlez-api.web.app',
   'https://shuttlez-api.firebaseapp.com',
+  'https://shuttlez-nodejs-api.vercel.app',
 ];
 
 export async function createNestApp(
