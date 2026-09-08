@@ -1,16 +1,37 @@
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import {
   ExpressAdapter,
   NestExpressApplication,
 } from '@nestjs/platform-express';
-import { join } from 'path';
+import { isAbsolute, join } from 'path';
 import { existsSync, mkdirSync } from 'fs';
 import type { Express } from 'express';
 import { AppModule } from './app.module';
 import { driverTripsRateLimit } from './common/middleware/driver-trips-rate-limit';
+
+const logger = new Logger('CreateApp');
+
+function isServerlessRuntime(): boolean {
+  return Boolean(
+    process.env.VERCEL ||
+      process.env.AWS_LAMBDA_FUNCTION_NAME ||
+      process.env.LAMBDA_TASK_ROOT,
+  );
+}
+
+function resolveUploadDir(config: ConfigService): string {
+  const configured = config.get<string>('UPLOAD_DIR')?.trim();
+  if (isServerlessRuntime()) {
+    if (configured && configured.startsWith('/tmp')) {
+      return configured;
+    }
+    return join('/tmp', configured || 'uploads');
+  }
+  return configured || 'uploads';
+}
 
 const DEFAULT_ORIGINS = [
   'https://shuttlez.org',
@@ -56,11 +77,20 @@ export async function createNestApp(
     }),
   );
 
-  const uploadDir = config.get<string>('UPLOAD_DIR') ?? 'uploads';
-  if (!existsSync(uploadDir)) {
-    mkdirSync(uploadDir, { recursive: true });
+  const uploadDir = resolveUploadDir(config);
+  try {
+    if (!existsSync(uploadDir)) {
+      mkdirSync(uploadDir, { recursive: true });
+    }
+    const assetsRoot = isAbsolute(uploadDir)
+      ? uploadDir
+      : join(process.cwd(), uploadDir);
+    app.useStaticAssets(assetsRoot, { prefix: '/uploads' });
+  } catch (err) {
+    logger.warn(
+      `Skipping upload directory "${uploadDir}": ${(err as Error).message}`,
+    );
   }
-  app.useStaticAssets(join(process.cwd(), uploadDir), { prefix: '/uploads' });
 
   app.use(driverTripsRateLimit);
 
