@@ -7,6 +7,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { ContentModule } from './modules/content/content.module';
 import { LandingModule } from './modules/landing/landing.module';
 import { CoreApiModule } from './modules/core/core-api.module';
+import { RealtimeModule } from './modules/realtime/realtime.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { CoreApiModule } from './modules/core/core-api.module';
     ContentModule,
     LandingModule,
     CoreApiModule,
+    RealtimeModule,
   ],
 })
 export class AppModule {}

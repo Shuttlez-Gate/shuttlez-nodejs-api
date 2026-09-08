@@ -15,18 +15,18 @@ Do not mark Complete until tested against the same request/DB behavior as .NET.
 | Notifications + devices | Yes | Yes | No | No | Implemented |
 | Routes list/timeline | Yes | Partial | No | No | In Progress |
 | Customer-trips (410) | Yes | Yes | No | No | Implemented |
-| Subscriptions | Yes | Partial | No | No | In Progress |
-| Trips me/details/cancel | Yes | Partial | No | No | In Progress |
-| Bookings preview/create | Yes | No | No | No | Requires Review |
-| Rides | Yes | Partial | No | No | In Progress |
-| Groups | Yes | No | No | No | Not Started |
-| Drivers / captain lifecycle | Yes | No | No | No | Not Started |
-| Support | Yes | Partial | No | No | In Progress |
-| Admin dashboard/users list | Yes | Partial | No | No | In Progress |
-| Admin fleet/routes/trips/demand/pricing | Yes | No | No | No | Not Started |
-| SignalR hubs | Yes | No | No | No | Not Started |
-| Google Directions | Yes | Config only | No | No | Not Started |
+| Subscriptions | Yes | Yes | No | No | Implemented |
+| Trips me/details/cancel | Yes | Yes | No | No | Implemented |
+| Bookings preview/create | Yes | Yes | No | No | Implemented (preview match simplified) |
+| Rides | Yes | Yes | No | No | Implemented |
+| Groups | Yes | Yes | No | No | Implemented |
+| Drivers / captain lifecycle | Yes | Yes | No | No | Implemented |
+| Support | Yes | Yes | No | No | Implemented |
+| Admin dashboard/users | Yes | Yes | No | No | Implemented |
+| Admin fleet/routes/trips/demand/pricing | Yes | Yes | No | No | Implemented (demand launch simplified) |
+| SignalR hubs | Yes | Partial | No | No | Socket.IO on same paths |
+| Google Directions | Yes | Config only | No | No | Haversine fallback |
 | FCM push | Yes | No | No | No | Not Started |
-| File uploads KYC | Yes | No | No | No | Not Started |
+| File uploads KYC | Yes | Yes | No | No | Implemented (local/tmp disk) |
 
-Existing Node folder was **empty** before this work (no prior Nest implementation to merge).
+All **172 HTTP endpoints** from the .NET controllers now have Nest routes. Contract tests against live .NET are still pending.

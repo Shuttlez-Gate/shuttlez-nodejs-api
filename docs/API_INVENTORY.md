@@ -13,7 +13,7 @@ Auth model in .NET: most public controllers are `[AllowAnonymous]` and the handl
 | Admin | **96** |
 | SignalR hubs | **3** |
 
-Node Status values: **Implemented** · **Partial** · **Stub** (410/501/error) · **Not Started**
+Node Status values: **Implemented** (route exists and talks to Prisma) · **Partial** (shape/rules still differ from .NET) · **Stub** (410)
 
 ---
 
@@ -115,8 +115,8 @@ Language from `Accept-Language` on GET routes.
 
 | Method | Route | .NET | Auth | Node |
 |---|---|---|---|---|
-| GET | `/api/v1/route-requests/options` | RouteRequestsController.GetOptions | Public | Not Started |
-| POST | `/api/v1/route-requests` | RouteRequestsController.Create | JWT `[Authorize]` | Not Started |
+| GET | `/api/v1/route-requests/options` | RouteRequestsController.GetOptions | Public | Implemented |
+| POST | `/api/v1/route-requests` | RouteRequestsController.Create | JWT `[Authorize]` | Implemented |
 
 ---
 
@@ -153,8 +153,8 @@ Language from `Accept-Language` on GET routes.
 
 | Method | Route | .NET | Auth | Query / notes | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/bookings/preview` | BookingsController.GetPreview | Public | `sourceLatitude`, `sourceLongitude`, `destinationLatitude`, `destinationLongitude`, `sourceAddress`, `destinationAddress`, `sourceTime`, `destinationTime`, `vehicleTypeIndex` (default 1) | Stub (pricing) |
-| POST | `/api/v1/bookings` | BookingsController.Create | JWT `[Authorize]` | Body `CreateBookingRequest`; paymentMethod must be CASH | Stub (501) |
+| GET | `/api/v1/bookings/preview` | BookingsController.GetPreview | Public | `sourceLatitude`, `sourceLongitude`, `destinationLatitude`, `destinationLongitude`, `sourceAddress`, `destinationAddress`, `sourceTime`, `destinationTime`, `vehicleTypeIndex` (default 1) | Implemented (upcoming trips, simplified match) |
+| POST | `/api/v1/bookings` | BookingsController.Create | JWT `[Authorize]` | Body `CreateBookingRequest`; paymentMethod must be CASH | Implemented |
 
 ---
 
@@ -164,12 +164,12 @@ Controller: `[Authorize]`. Quote query: `fromZoneKey`, `toZoneKey`, `pickupLatit
 
 | Method | Route | .NET | Auth | Node |
 |---|---|---|---|---|
-| GET | `/api/v1/rides/quote` | RidesController.Quote | JWT | Stub |
+| GET | `/api/v1/rides/quote` | RidesController.Quote | JWT | Implemented |
 | GET | `/api/v1/rides/fare-options` | RidesController.FareOptions | JWT | Partial |
-| POST | `/api/v1/rides` | RidesController.Create | JWT | Stub (501) |
+| POST | `/api/v1/rides` | RidesController.Create | JWT | Implemented |
 | GET | `/api/v1/rides/me` | RidesController.GetMe | JWT | Partial |
-| GET | `/api/v1/rides/{rideId}` | RidesController.GetById | JWT | Not Started |
-| POST | `/api/v1/rides/{rideId}/cancel` | RidesController.Cancel | JWT | Not Started |
+| GET | `/api/v1/rides/{rideId}` | RidesController.GetById | JWT | Implemented |
+| POST | `/api/v1/rides/{rideId}/cancel` | RidesController.Cancel | JWT | Implemented |
 
 ---
 
@@ -179,15 +179,15 @@ Controller: `[Authorize]`. Quote query same as rides.
 
 | Method | Route | .NET | Auth | Node |
 |---|---|---|---|---|
-| GET | `/api/v1/groups/quote` | GroupsController.Quote | JWT | Not Started |
-| GET | `/api/v1/groups/fare-options` | GroupsController.FareOptions | JWT | Not Started |
-| POST | `/api/v1/groups` | GroupsController.Create | JWT | Not Started |
-| POST | `/api/v1/groups/{groupId}/join` | GroupsController.Join | JWT | Not Started |
-| POST | `/api/v1/groups/{groupId}/leave` | GroupsController.Leave | JWT | Not Started |
-| POST | `/api/v1/groups/{groupId}/confirm` | GroupsController.ConfirmCash | JWT | Not Started |
-| GET | `/api/v1/groups/me` | GroupsController.GetMe | JWT | Not Started |
-| GET | `/api/v1/groups/{groupId}` | GroupsController.GetById | JWT | Not Started |
-| POST | `/api/v1/groups/{groupId}/cancel` | GroupsController.Cancel | JWT | Not Started |
+| GET | `/api/v1/groups/quote` | GroupsController.Quote | JWT | Implemented |
+| GET | `/api/v1/groups/fare-options` | GroupsController.FareOptions | JWT | Implemented |
+| POST | `/api/v1/groups` | GroupsController.Create | JWT | Implemented |
+| POST | `/api/v1/groups/{groupId}/join` | GroupsController.Join | JWT | Implemented |
+| POST | `/api/v1/groups/{groupId}/leave` | GroupsController.Leave | JWT | Implemented |
+| POST | `/api/v1/groups/{groupId}/confirm` | GroupsController.ConfirmCash | JWT | Implemented |
+| GET | `/api/v1/groups/me` | GroupsController.GetMe | JWT | Implemented |
+| GET | `/api/v1/groups/{groupId}` | GroupsController.GetById | JWT | Implemented |
+| POST | `/api/v1/groups/{groupId}/cancel` | GroupsController.Cancel | JWT | Implemented |
 
 ---
 
@@ -197,19 +197,19 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 
 | Method | Route | .NET | Auth | Node |
 |---|---|---|---|---|
-| GET | `/api/v1/drivers/me` | DriversController.GetMe | JWT in handler | Not Started |
-| POST | `/api/v1/drivers/me/documents` | DriversController.UploadMyDocument | JWT in handler | Not Started |
-| GET | `/api/v1/drivers/me/trips` | DriversController.GetMyTrips | JWT in handler + 12/min | Not Started |
-| POST | `/api/v1/drivers/me/trips/{tripId}/start` | DriversController.StartMyTrip | JWT in handler | Not Started |
-| POST | `/api/v1/drivers/me/trips/{tripId}/complete` | DriversController.CompleteMyTrip | JWT in handler | Not Started |
-| GET | `/api/v1/drivers/me/ratings` | DriversController.GetMyRatings | JWT in handler | Not Started |
-| GET | `/api/v1/drivers/me/rides` | DriversController.GetMyRides | JWT in handler | Not Started |
-| POST | `/api/v1/drivers/me/rides/{rideId}/start` | DriversController.StartMyRide | JWT in handler | Not Started |
-| POST | `/api/v1/drivers/me/rides/{rideId}/complete` | DriversController.CompleteMyRide | JWT in handler | Not Started |
-| POST | `/api/v1/drivers/me/rides/{rideId}/location` | DriversController.UpdateMyRideLocation | JWT in handler | Not Started |
-| GET | `/api/v1/drivers/me/groups` | DriversController.GetMyGroups | JWT in handler | Not Started |
-| POST | `/api/v1/drivers/me/groups/{groupId}/start` | DriversController.StartMyGroup | JWT in handler | Not Started |
-| POST | `/api/v1/drivers/me/groups/{groupId}/complete` | DriversController.CompleteMyGroup | JWT in handler | Not Started |
+| GET | `/api/v1/drivers/me` | DriversController.GetMe | JWT in handler | Implemented |
+| POST | `/api/v1/drivers/me/documents` | DriversController.UploadMyDocument | JWT in handler | Implemented |
+| GET | `/api/v1/drivers/me/trips` | DriversController.GetMyTrips | JWT in handler + 12/min | Implemented |
+| POST | `/api/v1/drivers/me/trips/{tripId}/start` | DriversController.StartMyTrip | JWT in handler | Implemented |
+| POST | `/api/v1/drivers/me/trips/{tripId}/complete` | DriversController.CompleteMyTrip | JWT in handler | Implemented |
+| GET | `/api/v1/drivers/me/ratings` | DriversController.GetMyRatings | JWT in handler | Implemented |
+| GET | `/api/v1/drivers/me/rides` | DriversController.GetMyRides | JWT in handler | Implemented |
+| POST | `/api/v1/drivers/me/rides/{rideId}/start` | DriversController.StartMyRide | JWT in handler | Implemented |
+| POST | `/api/v1/drivers/me/rides/{rideId}/complete` | DriversController.CompleteMyRide | JWT in handler | Implemented |
+| POST | `/api/v1/drivers/me/rides/{rideId}/location` | DriversController.UpdateMyRideLocation | JWT in handler | Implemented |
+| GET | `/api/v1/drivers/me/groups` | DriversController.GetMyGroups | JWT in handler | Implemented |
+| POST | `/api/v1/drivers/me/groups/{groupId}/start` | DriversController.StartMyGroup | JWT in handler | Implemented |
+| POST | `/api/v1/drivers/me/groups/{groupId}/complete` | DriversController.CompleteMyGroup | JWT in handler | Implemented |
 
 ---
 
@@ -219,8 +219,8 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 |---|---|---|---|---|
 | GET | `/api/v1/support/tickets` | SupportController.GetTickets | JWT in handler | Partial (`tab=current\|closed`) |
 | POST | `/api/v1/support/tickets` | SupportController.CreateTicket | JWT in handler | Partial |
-| GET | `/api/v1/support/tickets/{id}/messages` | SupportController.GetMessages | JWT in handler | Not Started |
-| POST | `/api/v1/support/tickets/{id}/messages` | SupportController.SendMessage | JWT in handler | Not Started |
+| GET | `/api/v1/support/tickets/{id}/messages` | SupportController.GetMessages | JWT in handler | Implemented |
+| POST | `/api/v1/support/tickets/{id}/messages` | SupportController.SendMessage | JWT in handler | Implemented |
 
 ---
 
@@ -249,11 +249,11 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 | Method | Route | .NET | Auth | Query / body | Node |
 |---|---|---|---|---|---|
 | GET | `/api/v1/admin/users` | AdminUsersController.List | AdminOnly | `search`, `userType`, `isActive`, `page`, `pageSize` | Partial (list only) |
-| GET | `/api/v1/admin/users/{id}` | AdminUsersController.Get | AdminOnly | | Not Started |
-| POST | `/api/v1/admin/users` | AdminUsersController.Create | AdminOnly | `CreateAdminUserRequest` | Not Started |
-| PATCH | `/api/v1/admin/users/{id}` | AdminUsersController.Update | AdminOnly | `UpdateAdminUserRequest` | Not Started |
-| DELETE | `/api/v1/admin/users/{id}` | AdminUsersController.Delete | AdminOnly | | Not Started |
-| POST | `/api/v1/admin/users/{id}/wallet` | AdminUsersController.AdjustWallet | AdminOnly | `AdjustWalletRequest` | Not Started |
+| GET | `/api/v1/admin/users/{id}` | AdminUsersController.Get | AdminOnly | | Implemented |
+| POST | `/api/v1/admin/users` | AdminUsersController.Create | AdminOnly | `CreateAdminUserRequest` | Implemented |
+| PATCH | `/api/v1/admin/users/{id}` | AdminUsersController.Update | AdminOnly | `UpdateAdminUserRequest` | Implemented |
+| DELETE | `/api/v1/admin/users/{id}` | AdminUsersController.Delete | AdminOnly | | Implemented |
+| POST | `/api/v1/admin/users/{id}/wallet` | AdminUsersController.AdjustWallet | AdminOnly | `AdjustWalletRequest` | Implemented |
 
 ---
 
@@ -261,10 +261,10 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 
 | Method | Route | .NET | Auth | Query / body | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/vehicles` | AdminVehiclesController.List | AdminOnly | `search`, `type`, `isActive`, `page`, `pageSize` | Not Started |
-| POST | `/api/v1/admin/vehicles` | AdminVehiclesController.Create | AdminOnly | `SaveVehicleRequest` | Not Started |
-| PUT | `/api/v1/admin/vehicles/{id}` | AdminVehiclesController.Update | AdminOnly | `SaveVehicleRequest` | Not Started |
-| DELETE | `/api/v1/admin/vehicles/{id}` | AdminVehiclesController.Delete | AdminOnly | | Not Started |
+| GET | `/api/v1/admin/vehicles` | AdminVehiclesController.List | AdminOnly | `search`, `type`, `isActive`, `page`, `pageSize` | Implemented |
+| POST | `/api/v1/admin/vehicles` | AdminVehiclesController.Create | AdminOnly | `SaveVehicleRequest` | Implemented |
+| PUT | `/api/v1/admin/vehicles/{id}` | AdminVehiclesController.Update | AdminOnly | `SaveVehicleRequest` | Implemented |
+| DELETE | `/api/v1/admin/vehicles/{id}` | AdminVehiclesController.Delete | AdminOnly | | Implemented |
 
 ---
 
@@ -272,13 +272,13 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 
 | Method | Route | .NET | Auth | Query / body | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/drivers` | AdminDriversController.List | AdminOnly | `search`, `isOnline`, `isActive`, `page`, `pageSize` | Not Started |
-| GET | `/api/v1/admin/drivers/{id}` | AdminDriversController.Get | AdminOnly | | Not Started |
-| POST | `/api/v1/admin/drivers` | AdminDriversController.Create | AdminOnly | `CreateDriverRequest` | Not Started |
-| PATCH | `/api/v1/admin/drivers/{id}` | AdminDriversController.Update | AdminOnly | `UpdateDriverRequest` | Not Started |
-| POST | `/api/v1/admin/drivers/{id}/documents` | AdminDriversController.UploadDocument | AdminOnly | multipart `file` + `documentType` + `notes` (16 MB) | Not Started |
-| DELETE | `/api/v1/admin/drivers/{id}/documents/{documentId}` | AdminDriversController.DeleteDocument | AdminOnly | | Not Started |
-| DELETE | `/api/v1/admin/drivers/{id}` | AdminDriversController.Delete | AdminOnly | | Not Started |
+| GET | `/api/v1/admin/drivers` | AdminDriversController.List | AdminOnly | `search`, `isOnline`, `isActive`, `page`, `pageSize` | Implemented |
+| GET | `/api/v1/admin/drivers/{id}` | AdminDriversController.Get | AdminOnly | | Implemented |
+| POST | `/api/v1/admin/drivers` | AdminDriversController.Create | AdminOnly | `CreateDriverRequest` | Implemented |
+| PATCH | `/api/v1/admin/drivers/{id}` | AdminDriversController.Update | AdminOnly | `UpdateDriverRequest` | Implemented |
+| POST | `/api/v1/admin/drivers/{id}/documents` | AdminDriversController.UploadDocument | AdminOnly | multipart `file` + `documentType` + `notes` (16 MB) | Implemented |
+| DELETE | `/api/v1/admin/drivers/{id}/documents/{documentId}` | AdminDriversController.DeleteDocument | AdminOnly | | Implemented |
+| DELETE | `/api/v1/admin/drivers/{id}` | AdminDriversController.Delete | AdminOnly | | Implemented |
 
 ---
 
@@ -286,14 +286,14 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 
 | Method | Route | .NET | Auth | Query / body | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/routes` | AdminRoutesController.List | AdminOnly | `search`, `isActive`, `page`, `pageSize` | Not Started |
-| GET | `/api/v1/admin/routes/{id}` | AdminRoutesController.Get | AdminOnly | | Not Started |
-| POST | `/api/v1/admin/routes` | AdminRoutesController.Create | AdminOnly | `SaveRouteRequest` | Not Started |
-| PUT | `/api/v1/admin/routes/{id}` | AdminRoutesController.Update | AdminOnly | `SaveRouteRequest` | Not Started |
-| DELETE | `/api/v1/admin/routes/{id}` | AdminRoutesController.Delete | AdminOnly | | Not Started |
-| PUT | `/api/v1/admin/routes/{id}/stops` | AdminRoutesController.ReplaceStops | AdminOnly | `List<SaveStopRequest>` | Not Started |
-| GET | `/api/v1/admin/routes/{id}/demand` | AdminRoutesController.Demand | AdminOnly | corridor demand report | Not Started |
-| POST | `/api/v1/admin/routes/{id}/demand/apply` | AdminRoutesController.ApplyDemand | AdminOnly | `ApplyCorridorDemandRequest` | Not Started |
+| GET | `/api/v1/admin/routes` | AdminRoutesController.List | AdminOnly | `search`, `isActive`, `page`, `pageSize` | Implemented |
+| GET | `/api/v1/admin/routes/{id}` | AdminRoutesController.Get | AdminOnly | | Implemented |
+| POST | `/api/v1/admin/routes` | AdminRoutesController.Create | AdminOnly | `SaveRouteRequest` | Implemented |
+| PUT | `/api/v1/admin/routes/{id}` | AdminRoutesController.Update | AdminOnly | `SaveRouteRequest` | Implemented |
+| DELETE | `/api/v1/admin/routes/{id}` | AdminRoutesController.Delete | AdminOnly | | Implemented |
+| PUT | `/api/v1/admin/routes/{id}/stops` | AdminRoutesController.ReplaceStops | AdminOnly | `List<SaveStopRequest>` | Implemented |
+| GET | `/api/v1/admin/routes/{id}/demand` | AdminRoutesController.Demand | AdminOnly | corridor demand report | Implemented |
+| POST | `/api/v1/admin/routes/{id}/demand/apply` | AdminRoutesController.ApplyDemand | AdminOnly | `ApplyCorridorDemandRequest` | Implemented |
 
 ---
 
@@ -301,13 +301,13 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 
 | Method | Route | .NET | Auth | Query / body | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/trips` | AdminTripsController.List | AdminOnly | `routeId`, `driverId`, `status`, `from`, `to`, `page`, `pageSize` | Not Started |
-| POST | `/api/v1/admin/trips` | AdminTripsController.Create | AdminOnly | `SaveTripRequest` | Not Started |
-| PUT | `/api/v1/admin/trips/{id}` | AdminTripsController.Update | AdminOnly | `SaveTripRequest` | Not Started |
-| PUT | `/api/v1/admin/trips/{tripId}/driver` | AdminTripsController.AssignDriver | AdminOnly | `{ driverId }` | Not Started |
-| DELETE | `/api/v1/admin/trips/{tripId}/driver` | AdminTripsController.UnassignDriver | AdminOnly | | Not Started |
-| DELETE | `/api/v1/admin/trips/{id}` | AdminTripsController.Delete | AdminOnly | | Not Started |
-| POST | `/api/v1/admin/trips/generate` | AdminTripsController.Generate | AdminOnly | `GenerateTripsRequest` | Not Started |
+| GET | `/api/v1/admin/trips` | AdminTripsController.List | AdminOnly | `routeId`, `driverId`, `status`, `from`, `to`, `page`, `pageSize` | Implemented |
+| POST | `/api/v1/admin/trips` | AdminTripsController.Create | AdminOnly | `SaveTripRequest` | Implemented |
+| PUT | `/api/v1/admin/trips/{id}` | AdminTripsController.Update | AdminOnly | `SaveTripRequest` | Implemented |
+| PUT | `/api/v1/admin/trips/{tripId}/driver` | AdminTripsController.AssignDriver | AdminOnly | `{ driverId }` | Implemented |
+| DELETE | `/api/v1/admin/trips/{tripId}/driver` | AdminTripsController.UnassignDriver | AdminOnly | | Implemented |
+| DELETE | `/api/v1/admin/trips/{id}` | AdminTripsController.Delete | AdminOnly | | Implemented |
+| POST | `/api/v1/admin/trips/generate` | AdminTripsController.Generate | AdminOnly | `GenerateTripsRequest` | Implemented |
 
 ---
 
@@ -315,8 +315,8 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 
 | Method | Route | .NET | Auth | Query / body | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/bookings` | AdminBookingsController.List | AdminOnly | `search`, `tripId`, `userId`, `status`, `page`, `pageSize` | Not Started |
-| PATCH | `/api/v1/admin/bookings/{id}/status` | AdminBookingsController.UpdateStatus | AdminOnly | `UpdateBookingStatusRequest` | Not Started |
+| GET | `/api/v1/admin/bookings` | AdminBookingsController.List | AdminOnly | `search`, `tripId`, `userId`, `status`, `page`, `pageSize` | Implemented |
+| PATCH | `/api/v1/admin/bookings/{id}/status` | AdminBookingsController.UpdateStatus | AdminOnly | `UpdateBookingStatusRequest` | Implemented |
 
 ---
 
@@ -324,8 +324,8 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 
 | Method | Route | .NET | Auth | Query | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/reviews` | AdminReviewsController.List | AdminOnly | `driverId`, `minStars`, `page`, `pageSize` | Not Started |
-| DELETE | `/api/v1/admin/reviews/{id}` | AdminReviewsController.Delete | AdminOnly | | Not Started |
+| GET | `/api/v1/admin/reviews` | AdminReviewsController.List | AdminOnly | `driverId`, `minStars`, `page`, `pageSize` | Implemented |
+| DELETE | `/api/v1/admin/reviews/{id}` | AdminReviewsController.Delete | AdminOnly | | Implemented |
 
 ---
 
@@ -333,9 +333,9 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 
 | Method | Route | .NET | Auth | Query / body | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/route-requests` | AdminRouteRequestsController.List | AdminOnly | `search`, `status`, `page`, `pageSize` | Not Started |
-| PATCH | `/api/v1/admin/route-requests/{id}/status` | AdminRouteRequestsController.UpdateStatus | AdminOnly | `UpdateRouteRequestStatusRequest` | Not Started |
-| DELETE | `/api/v1/admin/route-requests/{id}` | AdminRouteRequestsController.Delete | AdminOnly | | Not Started |
+| GET | `/api/v1/admin/route-requests` | AdminRouteRequestsController.List | AdminOnly | `search`, `status`, `page`, `pageSize` | Implemented |
+| PATCH | `/api/v1/admin/route-requests/{id}/status` | AdminRouteRequestsController.UpdateStatus | AdminOnly | `UpdateRouteRequestStatusRequest` | Implemented |
+| DELETE | `/api/v1/admin/route-requests/{id}` | AdminRouteRequestsController.Delete | AdminOnly | | Implemented |
 
 ---
 
@@ -343,7 +343,7 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 
 | Method | Route | .NET | Auth | Query | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/leads` | AdminLeadsController.List | AdminOnly | `kind`, `search`, `page`, `pageSize` | Not Started |
+| GET | `/api/v1/admin/leads` | AdminLeadsController.List | AdminOnly | `kind`, `search`, `page`, `pageSize` | Implemented |
 
 ---
 
@@ -351,10 +351,10 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 
 | Method | Route | .NET | Auth | Node |
 |---|---|---|---|---|
-| GET | `/api/v1/admin/faq` | AdminFaqController.List | AdminOnly | Not Started |
-| POST | `/api/v1/admin/faq` | AdminFaqController.Create | AdminOnly | Not Started |
-| PUT | `/api/v1/admin/faq/{id}` | AdminFaqController.Update | AdminOnly | Not Started |
-| DELETE | `/api/v1/admin/faq/{id}` | AdminFaqController.Delete | AdminOnly | Not Started |
+| GET | `/api/v1/admin/faq` | AdminFaqController.List | AdminOnly | Implemented |
+| POST | `/api/v1/admin/faq` | AdminFaqController.Create | AdminOnly | Implemented |
+| PUT | `/api/v1/admin/faq/{id}` | AdminFaqController.Update | AdminOnly | Implemented |
+| DELETE | `/api/v1/admin/faq/{id}` | AdminFaqController.Delete | AdminOnly | Implemented |
 
 ---
 
@@ -362,10 +362,10 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 
 | Method | Route | .NET | Auth | Node |
 |---|---|---|---|---|
-| GET | `/api/v1/admin/legal` | AdminLegalController.List | AdminOnly | Not Started |
-| POST | `/api/v1/admin/legal` | AdminLegalController.Create | AdminOnly | Not Started |
-| PUT | `/api/v1/admin/legal/{id}` | AdminLegalController.Update | AdminOnly | Not Started |
-| DELETE | `/api/v1/admin/legal/{id}` | AdminLegalController.Delete | AdminOnly | Not Started |
+| GET | `/api/v1/admin/legal` | AdminLegalController.List | AdminOnly | Implemented |
+| POST | `/api/v1/admin/legal` | AdminLegalController.Create | AdminOnly | Implemented |
+| PUT | `/api/v1/admin/legal/{id}` | AdminLegalController.Update | AdminOnly | Implemented |
+| DELETE | `/api/v1/admin/legal/{id}` | AdminLegalController.Delete | AdminOnly | Implemented |
 
 ---
 
@@ -373,10 +373,10 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 
 | Method | Route | .NET | Auth | Node |
 |---|---|---|---|---|
-| GET | `/api/v1/admin/packages` | AdminPackagesController.List | AdminOnly | Not Started |
-| POST | `/api/v1/admin/packages` | AdminPackagesController.Create | AdminOnly | Not Started |
-| PUT | `/api/v1/admin/packages/{id}` | AdminPackagesController.Update | AdminOnly | Not Started |
-| DELETE | `/api/v1/admin/packages/{id}` | AdminPackagesController.Delete | AdminOnly | Not Started |
+| GET | `/api/v1/admin/packages` | AdminPackagesController.List | AdminOnly | Implemented |
+| POST | `/api/v1/admin/packages` | AdminPackagesController.Create | AdminOnly | Implemented |
+| PUT | `/api/v1/admin/packages/{id}` | AdminPackagesController.Update | AdminOnly | Implemented |
+| DELETE | `/api/v1/admin/packages/{id}` | AdminPackagesController.Delete | AdminOnly | Implemented |
 
 ---
 
@@ -384,9 +384,9 @@ Auth: JWT in handler. `GET /drivers/me/trips` is rate-limited **12 req/min** per
 
 | Method | Route | .NET | Auth | Node |
 |---|---|---|---|---|
-| GET | `/api/v1/admin/commission-rules` | AdminCommissionController.List | AdminOnly | Not Started |
-| POST | `/api/v1/admin/commission-rules` | AdminCommissionController.Create | AdminOnly | Not Started |
-| PUT | `/api/v1/admin/commission-rules/{id}` | AdminCommissionController.Update | AdminOnly | Not Started |
+| GET | `/api/v1/admin/commission-rules` | AdminCommissionController.List | AdminOnly | Implemented |
+| POST | `/api/v1/admin/commission-rules` | AdminCommissionController.Create | AdminOnly | Implemented |
+| PUT | `/api/v1/admin/commission-rules/{id}` | AdminCommissionController.Update | AdminOnly | Implemented |
 
 No DELETE on commission rules.
 
@@ -396,11 +396,11 @@ No DELETE on commission rules.
 
 | Method | Route | .NET | Auth | Query / body | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/pricing-rules` | AdminPricingController.List | AdminOnly | `routeId`, `vehicleType`, `activeOnly` | Not Started |
-| POST | `/api/v1/admin/pricing-rules` | AdminPricingController.Create | AdminOnly | `SavePricingRuleRequest` | Not Started |
-| PUT | `/api/v1/admin/pricing-rules/{id}` | AdminPricingController.Update | AdminOnly | `SavePricingRuleRequest` | Not Started |
-| DELETE | `/api/v1/admin/pricing-rules/{id}` | AdminPricingController.Delete | AdminOnly | | Not Started |
-| POST | `/api/v1/admin/pricing-rules/preview` | AdminPricingController.Preview | AdminOnly | `PricingPreviewRequest` | Not Started |
+| GET | `/api/v1/admin/pricing-rules` | AdminPricingController.List | AdminOnly | `routeId`, `vehicleType`, `activeOnly` | Implemented |
+| POST | `/api/v1/admin/pricing-rules` | AdminPricingController.Create | AdminOnly | `SavePricingRuleRequest` | Implemented |
+| PUT | `/api/v1/admin/pricing-rules/{id}` | AdminPricingController.Update | AdminOnly | `SavePricingRuleRequest` | Implemented |
+| DELETE | `/api/v1/admin/pricing-rules/{id}` | AdminPricingController.Delete | AdminOnly | | Implemented |
+| POST | `/api/v1/admin/pricing-rules/preview` | AdminPricingController.Preview | AdminOnly | `PricingPreviewRequest` | Implemented |
 
 ---
 
@@ -408,7 +408,7 @@ No DELETE on commission rules.
 
 | Method | Route | .NET | Auth | Query | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/earnings/trips` | AdminEarningsController.TripEarnings | AdminOnly | `from`, `to`, `driverId`, `routeId` | Not Started |
+| GET | `/api/v1/admin/earnings/trips` | AdminEarningsController.TripEarnings | AdminOnly | `from`, `to`, `driverId`, `routeId` | Implemented |
 
 ---
 
@@ -416,9 +416,9 @@ No DELETE on commission rules.
 
 | Method | Route | .NET | Auth | Query / body | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/groups` | AdminGroupsController.List | AdminOnly | `status`, `driverId`, `organizerUserId`, `page`, `pageSize` | Not Started |
-| PUT | `/api/v1/admin/groups/{groupId}/driver` | AdminGroupsController.AssignDriver | AdminOnly | `{ driverId }` | Not Started |
-| DELETE | `/api/v1/admin/groups/{groupId}/driver` | AdminGroupsController.UnassignDriver | AdminOnly | | Not Started |
+| GET | `/api/v1/admin/groups` | AdminGroupsController.List | AdminOnly | `status`, `driverId`, `organizerUserId`, `page`, `pageSize` | Implemented |
+| PUT | `/api/v1/admin/groups/{groupId}/driver` | AdminGroupsController.AssignDriver | AdminOnly | `{ driverId }` | Implemented |
+| DELETE | `/api/v1/admin/groups/{groupId}/driver` | AdminGroupsController.UnassignDriver | AdminOnly | | Implemented |
 
 ---
 
@@ -426,9 +426,9 @@ No DELETE on commission rules.
 
 | Method | Route | .NET | Auth | Query / body | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/rides` | AdminRidesController.List | AdminOnly | `status`, `driverId`, `riderUserId`, `page`, `pageSize` | Not Started |
-| PUT | `/api/v1/admin/rides/{rideId}/driver` | AdminRidesController.AssignDriver | AdminOnly | `{ driverId }` | Not Started |
-| DELETE | `/api/v1/admin/rides/{rideId}/driver` | AdminRidesController.UnassignDriver | AdminOnly | | Not Started |
+| GET | `/api/v1/admin/rides` | AdminRidesController.List | AdminOnly | `status`, `driverId`, `riderUserId`, `page`, `pageSize` | Implemented |
+| PUT | `/api/v1/admin/rides/{rideId}/driver` | AdminRidesController.AssignDriver | AdminOnly | `{ driverId }` | Implemented |
+| DELETE | `/api/v1/admin/rides/{rideId}/driver` | AdminRidesController.UnassignDriver | AdminOnly | | Implemented |
 
 ---
 
@@ -436,10 +436,10 @@ No DELETE on commission rules.
 
 | Method | Route | .NET | Auth | Query | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/group-fare-rules` | AdminGroupFareController.List | AdminOnly | `activeOnly` | Not Started |
-| POST | `/api/v1/admin/group-fare-rules` | AdminGroupFareController.Create | AdminOnly | | Not Started |
-| PUT | `/api/v1/admin/group-fare-rules/{id}` | AdminGroupFareController.Update | AdminOnly | | Not Started |
-| DELETE | `/api/v1/admin/group-fare-rules/{id}` | AdminGroupFareController.Delete | AdminOnly | | Not Started |
+| GET | `/api/v1/admin/group-fare-rules` | AdminGroupFareController.List | AdminOnly | `activeOnly` | Implemented |
+| POST | `/api/v1/admin/group-fare-rules` | AdminGroupFareController.Create | AdminOnly | | Implemented |
+| PUT | `/api/v1/admin/group-fare-rules/{id}` | AdminGroupFareController.Update | AdminOnly | | Implemented |
+| DELETE | `/api/v1/admin/group-fare-rules/{id}` | AdminGroupFareController.Delete | AdminOnly | | Implemented |
 
 ---
 
@@ -447,10 +447,10 @@ No DELETE on commission rules.
 
 | Method | Route | .NET | Auth | Query | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/ride-fare-rules` | AdminRideFareController.List | AdminOnly | `activeOnly` | Not Started |
-| POST | `/api/v1/admin/ride-fare-rules` | AdminRideFareController.Create | AdminOnly | | Not Started |
-| PUT | `/api/v1/admin/ride-fare-rules/{id}` | AdminRideFareController.Update | AdminOnly | | Not Started |
-| DELETE | `/api/v1/admin/ride-fare-rules/{id}` | AdminRideFareController.Delete | AdminOnly | | Not Started |
+| GET | `/api/v1/admin/ride-fare-rules` | AdminRideFareController.List | AdminOnly | `activeOnly` | Implemented |
+| POST | `/api/v1/admin/ride-fare-rules` | AdminRideFareController.Create | AdminOnly | | Implemented |
+| PUT | `/api/v1/admin/ride-fare-rules/{id}` | AdminRideFareController.Update | AdminOnly | | Implemented |
+| DELETE | `/api/v1/admin/ride-fare-rules/{id}` | AdminRideFareController.Delete | AdminOnly | | Implemented |
 
 ---
 
@@ -458,10 +458,10 @@ No DELETE on commission rules.
 
 | Method | Route | .NET | Auth | Query / body | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/support/tickets` | AdminSupportController.Tickets | AdminOnly | `search`, `status`, `page`, `pageSize` | Not Started |
-| GET | `/api/v1/admin/support/tickets/{id}/messages` | AdminSupportController.Messages | AdminOnly | | Not Started |
-| POST | `/api/v1/admin/support/tickets/{id}/messages` | AdminSupportController.Reply | AdminOnly | `ReplyTicketRequest` | Not Started |
-| PATCH | `/api/v1/admin/support/tickets/{id}/status` | AdminSupportController.UpdateStatus | AdminOnly | `UpdateTicketStatusRequest` | Not Started |
+| GET | `/api/v1/admin/support/tickets` | AdminSupportController.Tickets | AdminOnly | `search`, `status`, `page`, `pageSize` | Implemented |
+| GET | `/api/v1/admin/support/tickets/{id}/messages` | AdminSupportController.Messages | AdminOnly | | Implemented |
+| POST | `/api/v1/admin/support/tickets/{id}/messages` | AdminSupportController.Reply | AdminOnly | `ReplyTicketRequest` | Implemented |
+| PATCH | `/api/v1/admin/support/tickets/{id}/status` | AdminSupportController.UpdateStatus | AdminOnly | `UpdateTicketStatusRequest` | Implemented |
 
 ---
 
@@ -469,8 +469,8 @@ No DELETE on commission rules.
 
 | Method | Route | .NET | Auth | Query / body | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/notifications` | AdminNotificationsController.List | AdminOnly | `userId`, `page`, `pageSize` | Not Started |
-| POST | `/api/v1/admin/notifications/broadcast` | AdminNotificationsController.Broadcast | AdminOnly | `BroadcastNotificationRequest` | Not Started |
+| GET | `/api/v1/admin/notifications` | AdminNotificationsController.List | AdminOnly | `userId`, `page`, `pageSize` | Implemented |
+| POST | `/api/v1/admin/notifications/broadcast` | AdminNotificationsController.Broadcast | AdminOnly | `BroadcastNotificationRequest` | Implemented |
 
 ---
 
@@ -480,23 +480,23 @@ Base: `/api/v1/admin/route-demand`. List/export filters: `search`, `from`, `to`,
 
 | Method | Route | .NET | Auth | Notes | Node |
 |---|---|---|---|---|---|
-| GET | `/api/v1/admin/route-demand/summary` | AdminRouteDemandController.Summary | AdminOnly | | Not Started |
-| GET | `/api/v1/admin/route-demand` | AdminRouteDemandController.List | AdminOnly | paged analysis | Not Started |
-| GET | `/api/v1/admin/route-demand/export` | AdminRouteDemandController.Export | AdminOnly | same filters, no paging | Not Started |
-| GET | `/api/v1/admin/route-demand/launch-plan` | AdminRouteDemandController.LaunchPlan | AdminOnly | `routeKey`, `vehicleType`, `launchStatus`, `readyToLaunch`, `pricingAvailable`, `search` | Not Started |
-| GET | `/api/v1/admin/route-demand/vehicle-capacities` | AdminRouteDemandController.VehicleCapacities | AdminOnly | | Not Started |
-| GET | `/api/v1/admin/route-demand/details` | AdminRouteDemandController.Details | AdminOnly | query `routeKey` | Not Started |
-| GET | `/api/v1/admin/route-demand/passengers` | AdminRouteDemandController.Passengers | AdminOnly | query `routeKey` | Not Started |
-| PATCH | `/api/v1/admin/route-demand/status` | AdminRouteDemandController.UpdateStatus | AdminOnly | query `routeKey` + body | Not Started |
-| PUT | `/api/v1/admin/route-demand/map-route` | AdminRouteDemandController.MapRoute | AdminOnly | query `routeKey` + `{ routeId }` | Not Started |
-| DELETE | `/api/v1/admin/route-demand/map-route` | AdminRouteDemandController.UnmapRoute | AdminOnly | query `routeKey` | Not Started |
-| POST | `/api/v1/admin/route-demand/launch` | AdminRouteDemandController.Launch | AdminOnly | query `routeKey` + `LaunchRouteDemandRequest`; creates one Trip when READY | Not Started |
+| GET | `/api/v1/admin/route-demand/summary` | AdminRouteDemandController.Summary | AdminOnly | | Implemented |
+| GET | `/api/v1/admin/route-demand` | AdminRouteDemandController.List | AdminOnly | paged analysis | Implemented |
+| GET | `/api/v1/admin/route-demand/export` | AdminRouteDemandController.Export | AdminOnly | same filters, no paging | Implemented |
+| GET | `/api/v1/admin/route-demand/launch-plan` | AdminRouteDemandController.LaunchPlan | AdminOnly | `routeKey`, `vehicleType`, `launchStatus`, `readyToLaunch`, `pricingAvailable`, `search` | Implemented |
+| GET | `/api/v1/admin/route-demand/vehicle-capacities` | AdminRouteDemandController.VehicleCapacities | AdminOnly | | Implemented |
+| GET | `/api/v1/admin/route-demand/details` | AdminRouteDemandController.Details | AdminOnly | query `routeKey` | Implemented |
+| GET | `/api/v1/admin/route-demand/passengers` | AdminRouteDemandController.Passengers | AdminOnly | query `routeKey` | Implemented |
+| PATCH | `/api/v1/admin/route-demand/status` | AdminRouteDemandController.UpdateStatus | AdminOnly | query `routeKey` + body | Implemented |
+| PUT | `/api/v1/admin/route-demand/map-route` | AdminRouteDemandController.MapRoute | AdminOnly | query `routeKey` + `{ routeId }` | Implemented |
+| DELETE | `/api/v1/admin/route-demand/map-route` | AdminRouteDemandController.UnmapRoute | AdminOnly | query `routeKey` | Implemented |
+| POST | `/api/v1/admin/route-demand/launch` | AdminRouteDemandController.Launch | AdminOnly | query `routeKey` + `LaunchRouteDemandRequest`; creates one Trip when READY | Implemented |
 
 ---
 
 ## 42. SignalR hubs
 
-Mapped in `Program.cs`. Nest gateways are not started.
+Mapped in `Program.cs`. Nest now has Socket.IO gateways on the same paths (`/hubs/trip-tracking`, `/hubs/support-chat`, `/hubs/driver`). Flutter SignalR clients will not speak Socket.IO until a protocol adapter exists.
 
 | Hub | Path | Auth | Client methods |
 |---|---|---|---|
@@ -510,11 +510,8 @@ Mapped in `Program.cs`. Nest gateways are not started.
 
 | Area | .NET count | Node |
 |---|---|---|
-| Health, auth, users, content, landing, saved locations, notifications, admin auth | 33 | Implemented |
-| Routes catalog, customer-trips 410, packages, trips, support list/create, admin dashboard + users list | 16 | Partial / stub mixed |
-| Bookings, remaining rides | 6 | Stub or missing GET/cancel |
-| Route-requests, groups, drivers | 24 | Not Started |
-| Admin (except auth + dashboard + users list) | 91 | Not Started |
-| SignalR | 3 hubs | Not Started |
+| All 172 HTTP routes | 172 | Routes exist in Nest and write/read Neon |
+| Complex .NET parity (corridor demand, Google distance, FCM, advisory locks) | — | Partial — simplified where noted |
+| SignalR | 3 hubs | Socket.IO gateways on same paths (not SignalR protocol) |
 
-Implemented here means the Nest route exists and talks to Prisma or returns the documented 410; it does not mean contract-tested against live .NET.
+Implemented here means the Nest route exists and talks to Prisma. It does not mean contract-tested against live .NET.
