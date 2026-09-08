@@ -1,0 +1,44 @@
+{
+  "functions": [
+    {
+      "source": ".",
+      "codebase": "default",
+      "runtime": "nodejs22",
+      "predeploy": ["npm run build"],
+      "ignore": [
+        "node_modules",
+        ".git",
+        ".firebase",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "src",
+        "test",
+        "docs",
+        "uploads",
+        "coverage",
+        "*.md",
+        "Dockerfile",
+        "docker-compose.yml",
+        "eslint.config.mjs",
+        "jest.config.js",
+        ".prettierrc",
+        ".env.example",
+        ".env.local"
+      ]
+    }
+  ],
+  "hosting": {
+    "public": "public",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [
+      {
+        "source": "**",
+        "function": {
+          "functionId": "api",
+          "region": "europe-west1",
+          "pinTag": true
+        }
+      }
+    ]
+  }
+}

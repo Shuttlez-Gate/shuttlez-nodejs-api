@@ -1,0 +1,750 @@
+// Introspected from the existing .NET EF Core model (AppDbContextModelSnapshot).
+// Table and column names match Neon / EF PascalCase identifiers.
+// Do NOT run prisma migrate reset or prisma db push against production.
+// Prefer: npx prisma db pull  then  npx prisma generate
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                          String    @id @map("Id") @db.Uuid
+  phone                       String    @unique @map("Phone")
+  fullName                    String?   @map("FullName")
+  email                       String?   @map("Email")
+  gender                      Int?      @map("Gender")
+  avatarUrl                   String?   @map("AvatarUrl")
+  googleProviderId            String?   @unique @map("GoogleProviderId")
+  facebookProviderId          String?   @unique @map("FacebookProviderId")
+  userType                    Int       @default(1) @map("UserType")
+  ratingAverage               Decimal   @default(0) @map("RatingAverage") @db.Decimal
+  ratingCount                 Int       @default(0) @map("RatingCount")
+  fcmToken                    String?   @map("FcmToken")
+  activeSubscriptionPackageId String?   @map("ActiveSubscriptionPackageId") @db.Uuid
+  subscriptionExpiresAt       DateTime? @map("SubscriptionExpiresAt") @db.Timestamptz
+  subscriptionActivatedAt     DateTime? @map("SubscriptionActivatedAt") @db.Timestamptz
+  isActive                    Boolean   @default(true) @map("IsActive")
+  createdAt                   DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt                   DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted                   Boolean   @default(false) @map("IsDeleted")
+
+  driver             Driver?
+  wallet             Wallet?
+  savedLocations     SavedLocation[]
+  bookings           Booking[]
+  refreshTokens      RefreshToken[]
+  notifications      Notification[]
+  userDevices        UserDevice[]
+  routeRequests      RouteRequest[]
+  supportTickets     SupportTicket[]
+  reviews            Review[]
+  rideRequests       RideRequest[]     @relation("RideRider")
+  organizedGroups    GroupRequest[]    @relation("GroupOrganizer")
+  groupMemberships   GroupMember[]
+
+  @@map("UsersSet")
+}
+
+model OtpRequest {
+  id        String    @id @map("Id") @db.Uuid
+  phone     String    @map("Phone")
+  codeHash  String    @map("CodeHash")
+  purpose   Int       @map("Purpose")
+  expiresAt DateTime  @map("ExpiresAt") @db.Timestamptz
+  attempts  Int       @default(0) @map("Attempts")
+  isUsed    Boolean   @default(false) @map("IsUsed")
+  createdAt DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted Boolean   @default(false) @map("IsDeleted")
+
+  @@map("OtpRequestsSet")
+}
+
+model RefreshToken {
+  id              String    @id @map("Id") @db.Uuid
+  userId          String    @map("UserId") @db.Uuid
+  token           String    @unique @map("Token")
+  expiresAt       DateTime  @map("ExpiresAt") @db.Timestamptz
+  revokedAt       DateTime? @map("RevokedAt") @db.Timestamptz
+  replacedByToken String?   @map("ReplacedByToken")
+  createdByIp     String?   @map("CreatedByIp")
+  createdAt       DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt       DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted       Boolean   @default(false) @map("IsDeleted")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("RefreshTokensSet")
+}
+
+model SavedLocation {
+  id         String    @id @map("Id") @db.Uuid
+  userId     String    @map("UserId") @db.Uuid
+  label      String    @map("Label")
+  address    String    @map("Address")
+  latitude   Float     @map("Latitude")
+  longitude  Float     @map("Longitude")
+  isFavorite Boolean   @default(false) @map("IsFavorite")
+  createdAt  DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt  DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted  Boolean   @default(false) @map("IsDeleted")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("SavedLocationsSet")
+}
+
+model Driver {
+  id                 String    @id @map("Id") @db.Uuid
+  userId             String    @unique @map("UserId") @db.Uuid
+  vehicleId          String?   @map("VehicleId") @db.Uuid
+  ratingAverage      Decimal   @default(0) @map("RatingAverage") @db.Decimal
+  ratingCount        Int       @default(0) @map("RatingCount")
+  isOnline           Boolean   @default(false) @map("IsOnline")
+  isActive           Boolean   @default(true) @map("IsActive")
+  verificationStatus Int       @default(1) @map("VerificationStatus")
+  nationalId         String?   @map("NationalId")
+  birthDate          DateTime? @map("BirthDate") @db.Date
+  licenseNumber      String?   @map("LicenseNumber")
+  licenseType        String?   @map("LicenseType")
+  licenseExpiry      DateTime? @map("LicenseExpiry") @db.Date
+  vehicleKind        String?   @map("VehicleKind")
+  vehicleModelName   String?   @map("VehicleModelName")
+  manufactureYear    Int?      @map("ManufactureYear")
+  plateNumber        String?   @map("PlateNumber")
+  vehicleColor       String?   @map("VehicleColor")
+  seats              Int?      @map("Seats")
+  adminNotes         String?   @map("AdminNotes")
+  verifiedAt         DateTime? @map("VerifiedAt") @db.Timestamptz
+  createdAt          DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt          DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted          Boolean   @default(false) @map("IsDeleted")
+
+  user              User                   @relation(fields: [userId], references: [id])
+  vehicle           Vehicle?               @relation(fields: [vehicleId], references: [id])
+  documents         DriverDocument[]
+  trips             Trip[]
+  rideRequests      RideRequest[]
+  groupRequests     GroupRequest[]
+  assignedDemands   RouteDemandGroupState[] @relation("DemandAssignedDriver")
+
+  @@index([userId])
+  @@map("DriversSet")
+}
+
+model DriverDocument {
+  id          String    @id @map("Id") @db.Uuid
+  driverId    String    @map("DriverId") @db.Uuid
+  documentType Int      @default(99) @map("DocumentType")
+  fileName    String    @map("FileName")
+  contentType String    @default("application/octet-stream") @map("ContentType")
+  sizeBytes   BigInt    @map("SizeBytes")
+  storagePath String    @map("StoragePath")
+  notes       String?   @map("Notes")
+  uploadedBy  String    @default("driver") @map("UploadedBy")
+  createdAt   DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt   DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted   Boolean   @default(false) @map("IsDeleted")
+
+  driver Driver @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@index([driverId])
+  @@map("DriverDocumentsSet")
+}
+
+model Vehicle {
+  id          String    @id @map("Id") @db.Uuid
+  plateNumber String    @map("PlateNumber")
+  model       String    @map("Model")
+  type        Int       @map("Type")
+  capacity    Int       @map("Capacity")
+  isActive    Boolean   @default(true) @map("IsActive")
+  createdAt   DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt   DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted   Boolean   @default(false) @map("IsDeleted")
+
+  drivers Driver[]
+
+  @@map("VehiclesSet")
+}
+
+model Route {
+  id                 String    @id @map("Id") @db.Uuid
+  name               String    @map("Name")
+  description        String?   @map("Description")
+  startLatitude      Float     @map("StartLatitude")
+  startLongitude     Float     @map("StartLongitude")
+  endLatitude        Float     @map("EndLatitude")
+  endLongitude       Float     @map("EndLongitude")
+  encodedPolyline    String?   @map("EncodedPolyline")
+  distanceMeters     Int?      @map("DistanceMeters")
+  durationSeconds    Int?      @map("DurationSeconds")
+  boundsMinLatitude  Float?    @map("BoundsMinLatitude")
+  boundsMaxLatitude  Float?    @map("BoundsMaxLatitude")
+  boundsMinLongitude Float?    @map("BoundsMinLongitude")
+  boundsMaxLongitude Float?    @map("BoundsMaxLongitude")
+  isActive           Boolean   @default(true) @map("IsActive")
+  createdAt          DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt          DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted          Boolean   @default(false) @map("IsDeleted")
+
+  stops                  Stop[]
+  trips                  Trip[]
+  pricingRules           PricingRule[]
+  waitlistEntries        LandingWaitlistEntry[]
+  mappedDemandStates     RouteDemandGroupState[] @relation("DemandMappedRoute")
+
+  @@map("RoutesSet")
+}
+
+model Stop {
+  id        String    @id @map("Id") @db.Uuid
+  routeId   String    @map("RouteId") @db.Uuid
+  name      String    @map("Name")
+  latitude  Float     @map("Latitude")
+  longitude Float     @map("Longitude")
+  order     Int       @map("Order")
+  createdAt DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted Boolean   @default(false) @map("IsDeleted")
+
+  route Route @relation(fields: [routeId], references: [id])
+
+  @@map("StopsSet")
+}
+
+model Trip {
+  id             String    @id @map("Id") @db.Uuid
+  routeId        String    @map("RouteId") @db.Uuid
+  driverId       String?   @map("DriverId") @db.Uuid
+  status         Int       @default(1) @map("Status")
+  scheduledAt    DateTime  @map("ScheduledAt") @db.Timestamptz
+  startedAt      DateTime? @map("StartedAt") @db.Timestamptz
+  completedAt    DateTime? @map("CompletedAt") @db.Timestamptz
+  pricePerSeat   Decimal   @map("PricePerSeat") @db.Decimal(18, 2)
+  availableSeats Int       @map("AvailableSeats")
+  referenceCode  String?   @map("ReferenceCode")
+  createdAt      DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt      DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted      Boolean   @default(false) @map("IsDeleted")
+
+  route    Route     @relation(fields: [routeId], references: [id])
+  driver   Driver?   @relation(fields: [driverId], references: [id])
+  bookings Booking[]
+  supportTickets SupportTicket[]
+
+  @@index([routeId])
+  @@map("TripsSet")
+}
+
+model Booking {
+  id                     String    @id @map("Id") @db.Uuid
+  tripId                 String    @map("TripId") @db.Uuid
+  userId                 String    @map("UserId") @db.Uuid
+  status                 Int       @default(1) @map("Status")
+  seatCount              Int       @default(1) @map("SeatCount")
+  totalAmount            Decimal   @map("TotalAmount") @db.Decimal(18, 2)
+  paymentMethod          String    @default("cash") @map("PaymentMethod")
+  referenceCode          String?   @map("ReferenceCode")
+  pricePerSeat           Decimal   @map("PricePerSeat") @db.Decimal(18, 2)
+  commissionRate         Decimal   @default(0) @map("CommissionRate") @db.Decimal(9, 6)
+  commissionAmount       Decimal   @default(0) @map("CommissionAmount") @db.Decimal(18, 2)
+  captainEarnings        Decimal   @default(0) @map("CaptainEarnings") @db.Decimal(18, 2)
+  usesSubscriptionCredit Boolean   @default(false) @map("UsesSubscriptionCredit")
+  createdAt              DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt              DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted              Boolean   @default(false) @map("IsDeleted")
+
+  trip    Trip     @relation(fields: [tripId], references: [id])
+  user    User     @relation(fields: [userId], references: [id])
+  invoice Invoice?
+
+  @@index([tripId])
+  @@index([userId])
+  @@map("BookingsSet")
+}
+
+model Invoice {
+  id               String    @id @map("Id") @db.Uuid
+  bookingId        String    @unique @map("BookingId") @db.Uuid
+  amount           Decimal   @map("Amount") @db.Decimal(18, 2)
+  status           Int       @default(1) @map("Status")
+  paymentReference String?   @map("PaymentReference")
+  paidAt           DateTime? @map("PaidAt") @db.Timestamptz
+  createdAt        DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt        DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted        Boolean   @default(false) @map("IsDeleted")
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@map("InvoicesSet")
+}
+
+model Wallet {
+  id        String    @id @map("Id") @db.Uuid
+  userId    String    @unique @map("UserId") @db.Uuid
+  balance   Decimal   @default(0) @map("Balance") @db.Decimal
+  currency  String    @default("EGP") @map("Currency")
+  createdAt DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted Boolean   @default(false) @map("IsDeleted")
+
+  user         User               @relation(fields: [userId], references: [id])
+  transactions WalletTransaction[]
+
+  @@map("WalletsSet")
+}
+
+model WalletTransaction {
+  id          String    @id @map("Id") @db.Uuid
+  walletId    String    @map("WalletId") @db.Uuid
+  amount      Decimal   @map("Amount") @db.Decimal
+  type        String    @map("Type")
+  description String?   @map("Description")
+  reference   String?   @map("Reference")
+  createdAt   DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt   DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted   Boolean   @default(false) @map("IsDeleted")
+
+  wallet Wallet @relation(fields: [walletId], references: [id])
+
+  @@map("WalletTransactionsSet")
+}
+
+model Review {
+  id        String    @id @map("Id") @db.Uuid
+  tripId    String    @map("TripId") @db.Uuid
+  userId    String    @map("UserId") @db.Uuid
+  driverId  String?   @map("DriverId") @db.Uuid
+  stars     Int       @map("Stars")
+  comment   String?   @map("Comment")
+  createdAt DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted Boolean   @default(false) @map("IsDeleted")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("ReviewsSet")
+}
+
+model Notification {
+  id        String    @id @map("Id") @db.Uuid
+  userId    String    @map("UserId") @db.Uuid
+  title     String    @map("Title")
+  body      String    @map("Body")
+  type      String?   @map("Type")
+  isRead    Boolean   @default(false) @map("IsRead")
+  readAt    DateTime? @map("ReadAt") @db.Timestamptz
+  createdAt DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted Boolean   @default(false) @map("IsDeleted")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("NotificationsSet")
+}
+
+model UserDevice {
+  id         String    @id @map("Id") @db.Uuid
+  userId     String    @map("UserId") @db.Uuid
+  token      String    @map("Token") @db.VarChar(512)
+  platform   String    @default("android") @map("Platform") @db.VarChar(32)
+  isActive   Boolean   @default(true) @map("IsActive")
+  lastSeenAt DateTime? @map("LastSeenAt") @db.Timestamptz
+  createdAt  DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt  DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted  Boolean   @default(false) @map("IsDeleted")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, token])
+  @@index([token])
+  @@index([userId])
+  @@map("UserDevicesSet")
+}
+
+model FaqItem {
+  id        String    @id @map("Id") @db.Uuid
+  question  String    @map("Question")
+  answer    String    @map("Answer")
+  order     Int       @map("Order")
+  isActive  Boolean   @default(true) @map("IsActive")
+  createdAt DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted Boolean   @default(false) @map("IsDeleted")
+
+  @@map("FaqItemsSet")
+}
+
+model LegalDocument {
+  id        String    @id @map("Id") @db.Uuid
+  slug      String    @unique @map("Slug")
+  title     String    @map("Title")
+  content   String    @map("Content")
+  titleEn   String?   @map("TitleEn")
+  contentEn String?   @map("ContentEn")
+  isActive  Boolean   @default(true) @map("IsActive")
+  createdAt DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted Boolean   @default(false) @map("IsDeleted")
+
+  @@map("LegalDocumentsSet")
+}
+
+model SupportTicket {
+  id        String    @id @map("Id") @db.Uuid
+  userId    String    @map("UserId") @db.Uuid
+  tripId    String?   @map("TripId") @db.Uuid
+  subject   String    @map("Subject")
+  status    String    @default("open") @map("Status")
+  closedAt  DateTime? @map("ClosedAt") @db.Timestamptz
+  createdAt DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted Boolean   @default(false) @map("IsDeleted")
+
+  user     User             @relation(fields: [userId], references: [id])
+  trip     Trip?            @relation(fields: [tripId], references: [id])
+  messages SupportMessage[]
+
+  @@map("SupportTicketsSet")
+}
+
+model SupportMessage {
+  id           String    @id @map("Id") @db.Uuid
+  ticketId     String    @map("TicketId") @db.Uuid
+  senderId     String    @map("SenderId") @db.Uuid
+  isFromSupport Boolean  @map("IsFromSupport")
+  content      String    @map("Content")
+  createdAt    DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt    DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted    Boolean   @default(false) @map("IsDeleted")
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id])
+
+  @@map("SupportMessagesSet")
+}
+
+model RouteRequest {
+  id                   String    @id @map("Id") @db.Uuid
+  userId               String    @map("UserId") @db.Uuid
+  fromAddress          String    @map("FromAddress")
+  toAddress            String    @map("ToAddress")
+  fromLatitude         Float     @map("FromLatitude")
+  fromLongitude        Float     @map("FromLongitude")
+  toLatitude           Float     @map("ToLatitude")
+  toLongitude          Float     @map("ToLongitude")
+  status               String    @default("pending") @map("Status")
+  notes                String?   @map("Notes")
+  preferredVehicleType String    @default("minibus") @map("PreferredVehicleType")
+  createdAt            DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt            DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted            Boolean   @default(false) @map("IsDeleted")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("RouteRequestsSet")
+}
+
+model SubscriptionPackage {
+  id          String    @id @map("Id") @db.Uuid
+  name        String    @map("Name")
+  description String?   @map("Description")
+  price       Decimal   @map("Price") @db.Decimal
+  tripCount   Int       @map("TripCount")
+  validityDays Int      @map("ValidityDays")
+  isActive    Boolean   @default(true) @map("IsActive")
+  createdAt   DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt   DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted   Boolean   @default(false) @map("IsDeleted")
+
+  @@map("SubscriptionPackagesSet")
+}
+
+model LandingRouteLead {
+  id          String    @id @map("Id") @db.Uuid
+  phone       String    @map("Phone")
+  fromCity    String    @map("FromCity")
+  fromRegion  String    @map("FromRegion")
+  fromTime    String?   @map("FromTime")
+  toCity      String    @map("ToCity")
+  toRegion    String    @map("ToRegion")
+  toTime      String?   @map("ToTime")
+  weeklyCount Int       @default(5) @map("WeeklyCount")
+  usageDays   String?   @map("UsageDays")
+  usageReason String?   @map("UsageReason")
+  source      String    @default("landing") @map("Source")
+  createdAt   DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt   DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted   Boolean   @default(false) @map("IsDeleted")
+
+  @@map("LandingRouteLeadsSet")
+}
+
+model LandingWaitlistEntry {
+  id        String    @id @map("Id") @db.Uuid
+  phone     String    @map("Phone")
+  fullName  String?   @map("FullName")
+  routeId   String?   @map("RouteId") @db.Uuid
+  routeFrom String?   @map("RouteFrom")
+  routeTo   String?   @map("RouteTo")
+  source    String    @default("landing") @map("Source")
+  createdAt DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted Boolean   @default(false) @map("IsDeleted")
+
+  route Route? @relation(fields: [routeId], references: [id])
+
+  @@map("LandingWaitlistEntriesSet")
+}
+
+model LandingCaptainLead {
+  id          String    @id @map("Id") @db.Uuid
+  phone       String    @map("Phone")
+  fullName    String?   @map("FullName")
+  vehicleType String?   @map("VehicleType")
+  notes       String?   @map("Notes")
+  source      String    @default("landing") @map("Source")
+  createdAt   DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt   DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted   Boolean   @default(false) @map("IsDeleted")
+
+  @@map("LandingCaptainLeadsSet")
+}
+
+model RouteDemandGroupState {
+  id               String    @id @map("Id") @db.Uuid
+  routeKey         String    @unique @map("RouteKey")
+  status           String    @default("new_demand") @map("Status")
+  assignedDriverId String?   @map("AssignedDriverId") @db.Uuid
+  adminNotes       String?   @map("AdminNotes")
+  mappedRouteId    String?   @map("MappedRouteId") @db.Uuid
+  mappedAt         DateTime? @map("MappedAt") @db.Timestamptz
+  mappedByUserId   String?   @map("MappedByUserId") @db.Uuid
+  createdAt        DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt        DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted        Boolean   @default(false) @map("IsDeleted")
+
+  assignedDriver Driver? @relation("DemandAssignedDriver", fields: [assignedDriverId], references: [id], onDelete: SetNull)
+  mappedRoute    Route?  @relation("DemandMappedRoute", fields: [mappedRouteId], references: [id], onDelete: SetNull)
+
+  @@index([mappedRouteId])
+  @@map("RouteDemandGroupStatesSet")
+}
+
+model CommissionRule {
+  id                         String    @id @map("Id") @db.Uuid
+  name                       String    @default("Default") @map("Name") @db.VarChar(128)
+  platformCommissionPercent  Decimal   @map("PlatformCommissionPercent") @db.Decimal(9, 4)
+  effectiveFrom              DateTime? @map("EffectiveFrom") @db.Timestamptz
+  effectiveTo                DateTime? @map("EffectiveTo") @db.Timestamptz
+  isActive                   Boolean   @default(true) @map("IsActive")
+  createdAt                  DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt                  DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted                  Boolean   @default(false) @map("IsDeleted")
+
+  @@map("CommissionRulesSet")
+}
+
+model PricingRule {
+  id                          String    @id @map("Id") @db.Uuid
+  name                        String    @default("Default") @map("Name") @db.VarChar(128)
+  routeId                     String?   @map("RouteId") @db.Uuid
+  vehicleType                 Int       @map("VehicleType")
+  oneWayPrice                 Decimal   @map("OneWayPrice") @db.Decimal(18, 2)
+  roundTripPrice              Decimal   @map("RoundTripPrice") @db.Decimal(18, 2)
+  weeklyPrice                 Decimal   @map("WeeklyPrice") @db.Decimal(18, 2)
+  monthlyPrice                Decimal   @map("MonthlyPrice") @db.Decimal(18, 2)
+  launchCommissionPercent     Decimal   @default(10) @map("LaunchCommissionPercent") @db.Decimal(9, 4)
+  permanentCommissionPercent  Decimal   @default(10) @map("PermanentCommissionPercent") @db.Decimal(9, 4)
+  launchPeriodDays            Int       @default(90) @map("LaunchPeriodDays")
+  launchStartAt               DateTime? @map("LaunchStartAt") @db.Timestamptz
+  minimumLaunchRiders         Int       @default(1) @map("MinimumLaunchRiders")
+  targetOccupancy             Int       @default(1) @map("TargetOccupancy")
+  effectiveFrom               DateTime? @map("EffectiveFrom") @db.Timestamptz
+  effectiveTo                 DateTime? @map("EffectiveTo") @db.Timestamptz
+  isActive                    Boolean   @default(true) @map("IsActive")
+  createdAt                   DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt                   DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted                   Boolean   @default(false) @map("IsDeleted")
+
+  route Route? @relation(fields: [routeId], references: [id], onDelete: SetNull)
+
+  @@index([routeId, vehicleType, isActive])
+  @@index([effectiveFrom])
+  @@index([effectiveTo])
+  @@map("PricingRulesSet")
+}
+
+model RideFareRule {
+  id            String    @id @map("Id") @db.Uuid
+  name          String    @default("Default") @map("Name") @db.VarChar(128)
+  fromZoneKey   String?   @map("FromZoneKey") @db.VarChar(64)
+  toZoneKey     String?   @map("ToZoneKey") @db.VarChar(64)
+  flatFare      Decimal   @default(0) @map("FlatFare") @db.Decimal(18, 2)
+  baseFare      Decimal   @default(0) @map("BaseFare") @db.Decimal(18, 2)
+  pricePerKm    Decimal   @default(0) @map("PricePerKm") @db.Decimal(18, 2)
+  minimumFare   Decimal?  @map("MinimumFare") @db.Decimal(18, 2)
+  maximumFare   Decimal?  @map("MaximumFare") @db.Decimal(18, 2)
+  effectiveFrom DateTime? @map("EffectiveFrom") @db.Timestamptz
+  effectiveTo   DateTime? @map("EffectiveTo") @db.Timestamptz
+  isActive      Boolean   @default(true) @map("IsActive")
+  createdAt     DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt     DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted     Boolean   @default(false) @map("IsDeleted")
+
+  rideRequests RideRequest[]
+
+  @@index([fromZoneKey, toZoneKey, isActive])
+  @@map("RideFareRulesSet")
+}
+
+model GroupFareRule {
+  id             String    @id @map("Id") @db.Uuid
+  name           String    @default("Default") @map("Name") @db.VarChar(128)
+  fromZoneKey    String?   @map("FromZoneKey") @db.VarChar(64)
+  toZoneKey      String?   @map("ToZoneKey") @db.VarChar(64)
+  charterFlatFare Decimal  @default(0) @map("CharterFlatFare") @db.Decimal(18, 2)
+  baseFare       Decimal   @default(0) @map("BaseFare") @db.Decimal(18, 2)
+  pricePerKm     Decimal   @default(0) @map("PricePerKm") @db.Decimal(18, 2)
+  minimumFare    Decimal?  @map("MinimumFare") @db.Decimal(18, 2)
+  maximumFare    Decimal?  @map("MaximumFare") @db.Decimal(18, 2)
+  maxMembers     Int       @default(1) @map("MaxMembers")
+  effectiveFrom  DateTime? @map("EffectiveFrom") @db.Timestamptz
+  effectiveTo    DateTime? @map("EffectiveTo") @db.Timestamptz
+  isActive       Boolean   @default(true) @map("IsActive")
+  createdAt      DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt      DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted      Boolean   @default(false) @map("IsDeleted")
+
+  groupRequests GroupRequest[]
+
+  @@index([fromZoneKey, toZoneKey, isActive])
+  @@map("GroupFareRulesSet")
+}
+
+model RideRequest {
+  id                      String    @id @map("Id") @db.Uuid
+  riderUserId             String    @map("RiderUserId") @db.Uuid
+  pickupLatitude          Float     @map("PickupLatitude")
+  pickupLongitude         Float     @map("PickupLongitude")
+  pickupAddress           String?   @map("PickupAddress") @db.VarChar(512)
+  destinationLatitude     Float     @map("DestinationLatitude")
+  destinationLongitude    Float     @map("DestinationLongitude")
+  destinationAddress      String?   @map("DestinationAddress") @db.VarChar(512)
+  fromZoneKey             String?   @map("FromZoneKey") @db.VarChar(64)
+  toZoneKey               String?   @map("ToZoneKey") @db.VarChar(64)
+  rideFareRuleId          String?   @map("RideFareRuleId") @db.Uuid
+  status                  Int       @default(1) @map("Status")
+  distanceKm              Decimal?  @map("DistanceKm") @db.Decimal(18, 2)
+  baseFareApplied         Decimal?  @map("BaseFareApplied") @db.Decimal(18, 2)
+  pricePerKmApplied       Decimal?  @map("PricePerKmApplied") @db.Decimal(18, 2)
+  minimumFareApplied      Decimal?  @map("MinimumFareApplied") @db.Decimal(18, 2)
+  fareAmount              Decimal   @map("FareAmount") @db.Decimal(18, 2)
+  commissionRate          Decimal   @default(0) @map("CommissionRate") @db.Decimal(9, 6)
+  commissionAmount        Decimal   @default(0) @map("CommissionAmount") @db.Decimal(18, 2)
+  captainEarnings         Decimal   @default(0) @map("CaptainEarnings") @db.Decimal(18, 2)
+  totalAmount             Decimal   @map("TotalAmount") @db.Decimal(18, 2)
+  paymentMethod           String    @default("cash") @map("PaymentMethod") @db.VarChar(32)
+  isCashConfirmed         Boolean   @default(false) @map("IsCashConfirmed")
+  driverId                String?   @map("DriverId") @db.Uuid
+  assignedAt              DateTime? @map("AssignedAt") @db.Timestamptz
+  startedAt               DateTime? @map("StartedAt") @db.Timestamptz
+  completedAt             DateTime? @map("CompletedAt") @db.Timestamptz
+  cancelledAt             DateTime? @map("CancelledAt") @db.Timestamptz
+  captainLatitude         Float?    @map("CaptainLatitude")
+  captainLongitude        Float?    @map("CaptainLongitude")
+  captainLocationUpdatedAt DateTime? @map("CaptainLocationUpdatedAt") @db.Timestamptz
+  referenceCode           String?   @map("ReferenceCode") @db.VarChar(32)
+  createdAt               DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt               DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted               Boolean   @default(false) @map("IsDeleted")
+
+  rider        User          @relation("RideRider", fields: [riderUserId], references: [id])
+  driver       Driver?       @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  rideFareRule RideFareRule? @relation(fields: [rideFareRuleId], references: [id], onDelete: SetNull)
+
+  @@index([riderUserId])
+  @@index([driverId])
+  @@index([status])
+  @@map("RideRequestsSet")
+}
+
+model GroupRequest {
+  id                   String    @id @map("Id") @db.Uuid
+  organizerUserId      String    @map("OrganizerUserId") @db.Uuid
+  pickupLatitude       Float     @map("PickupLatitude")
+  pickupLongitude      Float     @map("PickupLongitude")
+  pickupAddress        String?   @map("PickupAddress") @db.VarChar(512)
+  destinationLatitude  Float     @map("DestinationLatitude")
+  destinationLongitude Float     @map("DestinationLongitude")
+  destinationAddress   String?   @map("DestinationAddress") @db.VarChar(512)
+  fromZoneKey          String?   @map("FromZoneKey") @db.VarChar(64)
+  toZoneKey            String?   @map("ToZoneKey") @db.VarChar(64)
+  groupFareRuleId      String?   @map("GroupFareRuleId") @db.Uuid
+  capacity             Int       @map("Capacity")
+  joinedMemberCount    Int       @default(0) @map("JoinedMemberCount")
+  status               Int       @default(1) @map("Status")
+  distanceKm           Decimal?  @map("DistanceKm") @db.Decimal(18, 2)
+  baseFareApplied      Decimal?  @map("BaseFareApplied") @db.Decimal(18, 2)
+  pricePerKmApplied    Decimal?  @map("PricePerKmApplied") @db.Decimal(18, 2)
+  minimumFareApplied   Decimal?  @map("MinimumFareApplied") @db.Decimal(18, 2)
+  fareAmount           Decimal   @map("FareAmount") @db.Decimal(18, 2)
+  commissionRate       Decimal   @default(0) @map("CommissionRate") @db.Decimal(9, 6)
+  commissionAmount     Decimal   @default(0) @map("CommissionAmount") @db.Decimal(18, 2)
+  captainEarnings      Decimal   @default(0) @map("CaptainEarnings") @db.Decimal(18, 2)
+  totalAmount          Decimal   @map("TotalAmount") @db.Decimal(18, 2)
+  paymentMethod        String    @default("cash") @map("PaymentMethod") @db.VarChar(32)
+  isCashConfirmed      Boolean   @default(false) @map("IsCashConfirmed")
+  membershipLocked     Boolean   @default(false) @map("MembershipLocked")
+  driverId             String?   @map("DriverId") @db.Uuid
+  confirmedAt          DateTime? @map("ConfirmedAt") @db.Timestamptz
+  assignedAt           DateTime? @map("AssignedAt") @db.Timestamptz
+  startedAt            DateTime? @map("StartedAt") @db.Timestamptz
+  completedAt          DateTime? @map("CompletedAt") @db.Timestamptz
+  cancelledAt          DateTime? @map("CancelledAt") @db.Timestamptz
+  referenceCode        String?   @map("ReferenceCode") @db.VarChar(32)
+  createdAt            DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt            DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted            Boolean   @default(false) @map("IsDeleted")
+
+  organizer     User           @relation("GroupOrganizer", fields: [organizerUserId], references: [id])
+  driver        Driver?        @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  groupFareRule GroupFareRule? @relation(fields: [groupFareRuleId], references: [id], onDelete: SetNull)
+  members       GroupMember[]
+
+  @@index([organizerUserId])
+  @@index([driverId])
+  @@index([status])
+  @@map("GroupRequestsSet")
+}
+
+model GroupMember {
+  id             String    @id @map("Id") @db.Uuid
+  groupRequestId String    @map("GroupRequestId") @db.Uuid
+  userId         String    @map("UserId") @db.Uuid
+  isOrganizer    Boolean   @default(false) @map("IsOrganizer")
+  joinedAt       DateTime  @default(now()) @map("JoinedAt") @db.Timestamptz
+  createdAt      DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz
+  updatedAt      DateTime? @map("UpdatedAt") @db.Timestamptz
+  isDeleted      Boolean   @default(false) @map("IsDeleted")
+
+  groupRequest GroupRequest @relation(fields: [groupRequestId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@unique([groupRequestId, userId])
+  @@index([userId])
+  @@map("GroupMembersSet")
+}
+
+/// EF Core migrations history table — present on Neon. Keep mapped, unused by app code.
+model EfMigrationsHistory {
+  migrationId    String @id @map("MigrationId") @db.VarChar(150)
+  productVersion String @map("ProductVersion") @db.VarChar(32)
+
+  @@map("__EFMigrationsHistory")
+}

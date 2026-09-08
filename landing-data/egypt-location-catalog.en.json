@@ -1,0 +1,633 @@
+{
+  "cities": [
+    "Cairo",
+    "Giza",
+    "Alexandria",
+    "Qalyubia",
+    "Sharqia",
+    "Dakahlia",
+    "Gharbia",
+    "Suez",
+    "Monufia",
+    "Kafr El Sheikh",
+    "Beheira",
+    "Damietta",
+    "Port Said",
+    "Ismailia",
+    "North Sinai",
+    "South Sinai",
+    "Fayoum",
+    "Beni Suef",
+    "Minya",
+    "Assiut",
+    "Sohag",
+    "Qena",
+    "Luxor",
+    "Aswan",
+    "Red Sea",
+    "Matrouh",
+    "New Valley"
+  ],
+  "regionsByCity": {
+    "Cairo": [
+      "Downtown Cairo",
+      "Abdeen",
+      "Azbakeya",
+      "Bab El Shaaria",
+      "Bulaq",
+      "El Mosky",
+      "Sayeda Zeinab",
+      "El Khalifa",
+      "Old Cairo",
+      "Maadi",
+      "Tora",
+      "Helwan",
+      "El Tebbin",
+      "15th of May City",
+      "El Basatin",
+      "Dar El Salam",
+      "Mokattam",
+      "Nasr City",
+      "Heliopolis",
+      "El Nozha",
+      "Ain Shams",
+      "El Matareya",
+      "El Zeitoun",
+      "Hadayek El Kobba",
+      "El Waili",
+      "El Amiria",
+      "El Sharabia",
+      "Shubra",
+      "El Zawya El Hamra",
+      "El Salam",
+      "El Marg",
+      "Badr City",
+      "El Shorouk City",
+      "New Cairo",
+      "New Administrative Capital"
+    ],
+    "Giza": [
+      "Giza",
+      "6th of October City",
+      "Sheikh Zayed City",
+      "Smart Village",
+      "Kerdasa",
+      "Awsim",
+      "Manshiyat Al Qanater",
+      "Abu Nomros",
+      "Hawamdeya",
+      "El Badrashin",
+      "El Ayyat",
+      "El Saf",
+      "Atfih",
+      "Bahariya Oasis"
+    ],
+    "Alexandria": [
+      "Alexandria",
+      "Borg El Arab",
+      "New Borg El Arab"
+    ],
+    "Qalyubia": [
+      "Banha",
+      "Shubra El Kheima",
+      "Qalyub",
+      "Al Qanater Al Khayriya",
+      "El Khanka",
+      "El Khusus",
+      "Obour City",
+      "Qaha",
+      "Toukh",
+      "Kafr Shukr",
+      "Shibin El Qanater"
+    ],
+    "Sharqia": [
+      "Zagazig",
+      "10th of Ramadan City",
+      "Belbeis",
+      "Minya El Qamh",
+      "Abu Hammad",
+      "Abu Kebir",
+      "Faqous",
+      "El Husseiniya",
+      "Hehia",
+      "Mashtoul El Souq",
+      "El Ibrahimia",
+      "Deyarb Negm",
+      "Kafr Saqr",
+      "Awlad Saqr",
+      "El Qurein",
+      "San El Hagar",
+      "Manshayet Abu Omar"
+    ],
+    "Dakahlia": [
+      "Mansoura",
+      "Talkha",
+      "Meet Ghamr",
+      "El Senbellawein",
+      "Belqas",
+      "Dekernes",
+      "Sherbin",
+      "Aga",
+      "Nabroh",
+      "El Matareya",
+      "El Gamalia",
+      "Bani Obeid",
+      "Menyet El Nasr",
+      "Tami Al Amdid"
+    ],
+    "Gharbia": [
+      "Tanta",
+      "El Mahalla El Kubra",
+      "Kafr El Zayat",
+      "Zefta",
+      "Samannoud",
+      "Basyoun",
+      "El Santa",
+      "Qutur"
+    ],
+    "Suez": [
+      "Suez"
+    ],
+    "Monufia": [
+      "Shebin El Kom",
+      "Sadat City",
+      "Quesna",
+      "Menouf",
+      "Ashmoun",
+      "El Bagour",
+      "Tala",
+      "Berket El Saba",
+      "El Shohada",
+      "Sars El Layan"
+    ],
+    "Kafr El Sheikh": [
+      "Kafr El Sheikh",
+      "Desouk",
+      "Fowa",
+      "Motobas",
+      "Biyala",
+      "El Hamoul",
+      "Sidi Salem",
+      "El Riyadh",
+      "Baltim",
+      "Burullus",
+      "Qallin"
+    ],
+    "Beheira": [
+      "Damanhur",
+      "Kafr El Dawwar",
+      "Rosetta",
+      "Edku",
+      "Abu Hummus",
+      "Abu Al Matamir",
+      "El Delengat",
+      "Itay El Barud",
+      "El Rahmaniya",
+      "El Mahmoudiya",
+      "Hosh Issa",
+      "Kom Hamada",
+      "Badr",
+      "Wadi El Natrun",
+      "New Nubaria"
+    ],
+    "Damietta": [
+      "Damietta",
+      "Ras El Bar",
+      "New Damietta",
+      "Faraskur",
+      "El Zarqa",
+      "Kafr Saad",
+      "Kafr El Battikh"
+    ],
+    "Port Said": [
+      "Port Said",
+      "Port Fouad"
+    ],
+    "Ismailia": [
+      "Ismailia",
+      "Fayed",
+      "Qantara East",
+      "Qantara West",
+      "Tell El Kebir",
+      "Abu Suwir",
+      "New Kassasin"
+    ],
+    "North Sinai": [
+      "Arish",
+      "Bir El Abd",
+      "Sheikh Zuweid",
+      "Rafah",
+      "Al Hasana",
+      "Nakhl"
+    ],
+    "South Sinai": [
+      "Sharm El Sheikh",
+      "Dahab",
+      "Nuweiba",
+      "Taba",
+      "Saint Catherine",
+      "El Tor",
+      "Ras Sedr",
+      "Abu Zenima",
+      "Abu Redis"
+    ],
+    "Fayoum": [
+      "Fayoum",
+      "Sinnuris",
+      "Itsa",
+      "Tamiya",
+      "Abshway",
+      "Youssef El Seddiq"
+    ],
+    "Beni Suef": [
+      "Beni Suef",
+      "Al Wasta",
+      "Nasser",
+      "Ehnasia",
+      "Beba",
+      "Somosta",
+      "El Fashn"
+    ],
+    "Minya": [
+      "Minya",
+      "Mallawi",
+      "Samalut",
+      "Beni Mazar",
+      "Matay",
+      "Maghagha",
+      "Al Adwa",
+      "Abu Qurqas",
+      "Deir Mawas",
+      "New Minya"
+    ],
+    "Assiut": [
+      "Assiut",
+      "Dayrut",
+      "Al Qusiya",
+      "Manfalut",
+      "Abnub",
+      "Abu Tig",
+      "Sidfa",
+      "Sahel Selim",
+      "El Badari",
+      "El Ghanayem",
+      "El Fath",
+      "New Assiut"
+    ],
+    "Sohag": [
+      "Sohag",
+      "Akhmim",
+      "Girga",
+      "Tahta",
+      "Al Maragha",
+      "Al Balyana",
+      "Al Mansha",
+      "Saqalta",
+      "Juhayna",
+      "Dar El Salam",
+      "Tama"
+    ],
+    "Qena": [
+      "Qena",
+      "Nag Hammadi",
+      "Qus",
+      "Deshna",
+      "Abu Tesht",
+      "Al Waqf",
+      "Naqada",
+      "Farshut",
+      "Qift"
+    ],
+    "Luxor": [
+      "Luxor",
+      "Esna",
+      "Armant",
+      "El Tod",
+      "Al Bayadiyah",
+      "Al Ziniya",
+      "Al Qurna"
+    ],
+    "Aswan": [
+      "Aswan",
+      "Kom Ombo",
+      "Edfu",
+      "Draw",
+      "Nasr El Nuba",
+      "Abu Simbel"
+    ],
+    "Red Sea": [
+      "Hurghada",
+      "Marsa Alam",
+      "Safaga",
+      "El Quseir",
+      "Ras Gharib",
+      "Shalateen",
+      "Halaib"
+    ],
+    "Matrouh": [
+      "Marsa Matrouh",
+      "El Alamein",
+      "El Hammam",
+      "Dabaa",
+      "El Negaila",
+      "Sidi Barrani",
+      "Sallum",
+      "Siwa"
+    ],
+    "New Valley": [
+      "Kharga",
+      "Dakhla",
+      "Farafra",
+      "Paris",
+      "Balat",
+      "Mut"
+    ]
+  },
+  "areasByRegion": {
+    "Nasr City": [
+      "First District",
+      "Second District",
+      "Third District",
+      "Sixth District",
+      "Seventh District",
+      "Eighth District",
+      "Ninth District",
+      "Tenth District"
+    ],
+    "El Salam": [
+      "El Salam First",
+      "El Salam Second"
+    ],
+    "New Cairo": [
+      "First Settlement",
+      "Third Settlement",
+      "Fifth Settlement",
+      "Andalus",
+      "Narges",
+      "Yasmeen",
+      "Banafsaj",
+      "Lotus",
+      "Beit Al Watan",
+      "Al Rehab",
+      "Madinaty"
+    ],
+    "Giza": [
+      "Dokki",
+      "Agouza",
+      "Mohandessin",
+      "Bulaq El Dakrour",
+      "Omraneya",
+      "Talbia",
+      "Al Haram",
+      "Faisal",
+      "Hadayek Al Ahram",
+      "Imbaba",
+      "Al Warraq"
+    ],
+    "6th of October City": [
+      "First District",
+      "Second District",
+      "Third District",
+      "Fourth District",
+      "Fifth District",
+      "Sixth District",
+      "Seventh District",
+      "Eighth District",
+      "Ninth District",
+      "Tenth District",
+      "Hadayek October",
+      "West Somid",
+      "Northern Expansions",
+      "Industrial Zone"
+    ],
+    "Sheikh Zayed City": [
+      "First District",
+      "Second District",
+      "Third District",
+      "Fourth District",
+      "Fifth District",
+      "Sixth District",
+      "Seventh District",
+      "Eighth District",
+      "Ninth District",
+      "Tenth District"
+    ],
+    "Alexandria": [
+      "Sidi Gaber",
+      "Smouha",
+      "Sporting",
+      "Shatby",
+      "Camp Caesar",
+      "Ibrahimia",
+      "Roushdy",
+      "Gleem",
+      "San Stefano",
+      "Laurent",
+      "Cleopatra",
+      "Bakos",
+      "Victoria",
+      "Sidi Bishr",
+      "Asafra",
+      "Mandara",
+      "Miami",
+      "Abu Qir",
+      "Moharam Bek",
+      "Karmouz",
+      "Mina El Basal",
+      "El Labban",
+      "Mansheya",
+      "Attarin",
+      "Gomrok",
+      "Agami",
+      "El Bitash",
+      "Hanoville",
+      "Dekheila"
+    ],
+    "Shubra El Kheima": [
+      "Bahtim",
+      "Mostorod",
+      "Begam",
+      "Monshat Monti"
+    ],
+    "Obour City": [
+      "First District",
+      "Second District",
+      "Third District",
+      "Fourth District",
+      "Fifth District",
+      "Sixth District",
+      "Seventh District",
+      "Eighth District",
+      "Ninth District",
+      "Industrial Zone"
+    ],
+    "Zagazig": [
+      "Al Qawmia",
+      "Al Ghasham",
+      "University Villas",
+      "Kafr Abdel Aziz",
+      "Al Zohour"
+    ],
+    "10th of Ramadan City": [
+      "First District",
+      "Second District",
+      "Third District",
+      "Fourth District",
+      "Fifth District",
+      "Sixth District",
+      "Seventh District",
+      "Eighth District",
+      "Ninth District",
+      "Tenth District",
+      "First Industrial Zone",
+      "Second Industrial Zone",
+      "Third Industrial Zone"
+    ],
+    "Mansoura": [
+      "Toreil",
+      "El Meshaya",
+      "East District",
+      "West District",
+      "University District",
+      "Gedila",
+      "Kolongil"
+    ],
+    "Tanta": [
+      "Seger",
+      "El Galaa",
+      "El Agizy",
+      "Stadium District",
+      "Kahafa"
+    ],
+    "El Mahalla El Kubra": [
+      "Abu Shaheen",
+      "Manshiyat El Bakry",
+      "Shukri Al Quwatli",
+      "Sikka Zefta"
+    ],
+    "Suez": [
+      "Suez District",
+      "Arbaeen District",
+      "Faisal District",
+      "Ataqa District",
+      "Ganayen District"
+    ],
+    "Shebin El Kom": [
+      "Meet Khakan",
+      "Kafr El Meselha"
+    ],
+    "Kafr El Sheikh": [
+      "Sakha",
+      "Al Qantara Al Bayda"
+    ],
+    "Damanhur": [
+      "Al Abadiya",
+      "Qortasa",
+      "Naqraha",
+      "Shubra"
+    ],
+    "Damietta": [
+      "Al Aasr",
+      "Al Senania",
+      "Al Shoaraa",
+      "Ezbet El Borg"
+    ],
+    "Port Said": [
+      "East District",
+      "Arab District",
+      "Manakh District",
+      "Zohour District",
+      "Dawahy District",
+      "South District",
+      "West District"
+    ],
+    "Port Fouad": [
+      "Port Fouad 1",
+      "Port Fouad 2"
+    ],
+    "Ismailia": [
+      "First District",
+      "Second District",
+      "Third District",
+      "Sheikh Zayed",
+      "El Mostakbal"
+    ],
+    "Arish": [
+      "Al Masaeed",
+      "Al Risa",
+      "Al Samran",
+      "Abu Saqal"
+    ],
+    "Sharm El Sheikh": [
+      "Naama Bay",
+      "Hadaba",
+      "El Noor",
+      "Nabq",
+      "Ruwaisat",
+      "Montazah"
+    ],
+    "Fayoum": [
+      "Dar Al Ramad",
+      "Al Hadiqa",
+      "Qahafa",
+      "Lotf Allah"
+    ],
+    "Beni Suef": [
+      "Moqbel",
+      "Al Abassiry",
+      "Al Hamiyat",
+      "Al Gezira"
+    ],
+    "Minya": [
+      "Abu Hilal",
+      "Ard Sultan",
+      "Al Habashi",
+      "Shaheen"
+    ],
+    "Assiut": [
+      "Al Arbaeen",
+      "Al Walideya",
+      "Nazlet Abdallah",
+      "East District",
+      "West District"
+    ],
+    "Sohag": [
+      "Nasser City",
+      "Al Thaqafa",
+      "Al Kawamel"
+    ],
+    "Qena": [
+      "Al Hamidat",
+      "Al Maana",
+      "Al Shoon"
+    ],
+    "Luxor": [
+      "Karnak",
+      "Al Awamiya",
+      "Sharq El Sekka"
+    ],
+    "Aswan": [
+      "El Seil",
+      "Kima",
+      "Naseriya",
+      "Al Akkad"
+    ],
+    "Hurghada": [
+      "El Dahar",
+      "Sakkala",
+      "Kawthar",
+      "Al Ahyaa"
+    ],
+    "Marsa Matrouh": [
+      "Rommel",
+      "Alam El Rom",
+      "Kilometer 4",
+      "Lido"
+    ],
+    "Kharga": [
+      "Salam District",
+      "Zohour District",
+      "Amal District"
+    ]
+  }
+}

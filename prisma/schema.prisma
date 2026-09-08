@@ -1,0 +1,734 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Introspected from the EXISTING Neon database via `prisma db pull`.
+// Do NOT run prisma migrate reset or prisma db push against production.
+
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                          String          @id(map: "PK_UsersSet") @map("Id") @db.Uuid
+  phone                       String          @unique(map: "IX_UsersSet_Phone") @map("Phone")
+  fullName                    String?         @map("FullName")
+  email                       String?         @map("Email")
+  gender                      Int?            @map("Gender")
+  avatarUrl                   String?         @map("AvatarUrl")
+  userType                    Int             @map("UserType")
+  ratingAverage               Decimal         @map("RatingAverage") @db.Decimal
+  ratingCount                 Int             @map("RatingCount")
+  fcmToken                    String?         @map("FcmToken")
+  isActive                    Boolean         @map("IsActive")
+  createdAt                   DateTime        @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt                   DateTime?       @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted                   Boolean         @map("IsDeleted")
+  facebookProviderId          String?         @map("FacebookProviderId")
+  googleProviderId            String?         @map("GoogleProviderId")
+  activeSubscriptionPackageId String?         @map("ActiveSubscriptionPackageId") @db.Uuid
+  subscriptionExpiresAt       DateTime?       @map("SubscriptionExpiresAt") @db.Timestamptz(6)
+  subscriptionActivatedAt     DateTime?       @map("SubscriptionActivatedAt") @db.Timestamptz(6)
+  bookings                    Booking[]
+  driver                      Driver?
+  groupMemberships            GroupMember[]
+  organizedGroups             GroupRequest[]  @relation("GroupOrganizer")
+  notifications               Notification[]
+  refreshTokens               RefreshToken[]
+  reviews                     Review[]
+  rideRequests                RideRequest[]   @relation("RideRider")
+  routeRequests               RouteRequest[]
+  savedLocations              SavedLocation[]
+  supportTickets              SupportTicket[]
+  userDevices                 UserDevice[]
+  wallet                      Wallet?
+
+  @@map("UsersSet")
+}
+
+model OtpRequest {
+  id        String    @id(map: "PK_OtpRequestsSet") @map("Id") @db.Uuid
+  phone     String    @map("Phone")
+  codeHash  String    @map("CodeHash")
+  purpose   Int       @map("Purpose")
+  expiresAt DateTime  @map("ExpiresAt") @db.Timestamptz(6)
+  attempts  Int       @map("Attempts")
+  isUsed    Boolean   @map("IsUsed")
+  createdAt DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted Boolean   @map("IsDeleted")
+
+  @@map("OtpRequestsSet")
+}
+
+model RefreshToken {
+  id              String    @id(map: "PK_RefreshTokensSet") @map("Id") @db.Uuid
+  userId          String    @map("UserId") @db.Uuid
+  token           String    @unique(map: "IX_RefreshTokensSet_Token") @map("Token")
+  expiresAt       DateTime  @map("ExpiresAt") @db.Timestamptz(6)
+  revokedAt       DateTime? @map("RevokedAt") @db.Timestamptz(6)
+  replacedByToken String?   @map("ReplacedByToken")
+  createdByIp     String?   @map("CreatedByIp")
+  createdAt       DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt       DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted       Boolean   @map("IsDeleted")
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_RefreshTokensSet_UsersSet_UserId")
+
+  @@index([userId], map: "IX_RefreshTokensSet_UserId")
+  @@map("RefreshTokensSet")
+}
+
+model SavedLocation {
+  id         String    @id(map: "PK_SavedLocationsSet") @map("Id") @db.Uuid
+  userId     String    @map("UserId") @db.Uuid
+  label      String    @map("Label")
+  address    String    @map("Address")
+  latitude   Float     @map("Latitude")
+  longitude  Float     @map("Longitude")
+  isFavorite Boolean   @map("IsFavorite")
+  createdAt  DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt  DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted  Boolean   @map("IsDeleted")
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_SavedLocationsSet_UsersSet_UserId")
+
+  @@index([userId], map: "IX_SavedLocationsSet_UserId")
+  @@map("SavedLocationsSet")
+}
+
+model Driver {
+  id                 String                  @id(map: "PK_DriversSet") @map("Id") @db.Uuid
+  userId             String                  @unique(map: "IX_DriversSet_UserId") @map("UserId") @db.Uuid
+  vehicleId          String?                 @map("VehicleId") @db.Uuid
+  ratingAverage      Decimal                 @map("RatingAverage") @db.Decimal
+  ratingCount        Int                     @map("RatingCount")
+  isOnline           Boolean                 @map("IsOnline")
+  isActive           Boolean                 @map("IsActive")
+  createdAt          DateTime                @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt          DateTime?               @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted          Boolean                 @map("IsDeleted")
+  adminNotes         String?                 @map("AdminNotes")
+  birthDate          DateTime?               @map("BirthDate") @db.Date
+  licenseExpiry      DateTime?               @map("LicenseExpiry") @db.Date
+  licenseNumber      String?                 @map("LicenseNumber")
+  licenseType        String?                 @map("LicenseType")
+  manufactureYear    Int?                    @map("ManufactureYear")
+  nationalId         String?                 @map("NationalId")
+  plateNumber        String?                 @map("PlateNumber")
+  seats              Int?                    @map("Seats")
+  vehicleColor       String?                 @map("VehicleColor")
+  vehicleKind        String?                 @map("VehicleKind")
+  vehicleModelName   String?                 @map("VehicleModelName")
+  verificationStatus Int                     @default(0) @map("VerificationStatus")
+  verifiedAt         DateTime?               @map("VerifiedAt") @db.Timestamptz(6)
+  documents          DriverDocument[]
+  user               User                    @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_DriversSet_UsersSet_UserId")
+  vehicle            Vehicle?                @relation(fields: [vehicleId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "FK_DriversSet_VehiclesSet_VehicleId")
+  groupRequests      GroupRequest[]
+  rideRequests       RideRequest[]
+  assignedDemands    RouteDemandGroupState[] @relation("DemandAssignedDriver")
+  trips              Trip[]
+
+  @@index([vehicleId], map: "IX_DriversSet_VehicleId")
+  @@map("DriversSet")
+}
+
+model DriverDocument {
+  id           String    @id(map: "PK_DriverDocumentsSet") @map("Id") @db.Uuid
+  driverId     String    @map("DriverId") @db.Uuid
+  documentType Int       @map("DocumentType")
+  fileName     String    @map("FileName")
+  contentType  String    @map("ContentType")
+  sizeBytes    BigInt    @map("SizeBytes")
+  storagePath  String    @map("StoragePath")
+  notes        String?   @map("Notes")
+  uploadedBy   String    @map("UploadedBy")
+  createdAt    DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt    DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted    Boolean   @map("IsDeleted")
+  driver       Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_DriverDocumentsSet_DriversSet_DriverId")
+
+  @@index([driverId], map: "IX_DriverDocumentsSet_DriverId")
+  @@map("DriverDocumentsSet")
+}
+
+model Vehicle {
+  id          String    @id(map: "PK_VehiclesSet") @map("Id") @db.Uuid
+  plateNumber String    @map("PlateNumber")
+  model       String    @map("Model")
+  type        Int       @map("Type")
+  capacity    Int       @map("Capacity")
+  isActive    Boolean   @map("IsActive")
+  createdAt   DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt   DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted   Boolean   @map("IsDeleted")
+  drivers     Driver[]
+
+  @@map("VehiclesSet")
+}
+
+model Route {
+  id                 String                  @id(map: "PK_RoutesSet") @map("Id") @db.Uuid
+  name               String                  @map("Name")
+  description        String?                 @map("Description")
+  startLatitude      Float                   @map("StartLatitude")
+  startLongitude     Float                   @map("StartLongitude")
+  endLatitude        Float                   @map("EndLatitude")
+  endLongitude       Float                   @map("EndLongitude")
+  isActive           Boolean                 @map("IsActive")
+  createdAt          DateTime                @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt          DateTime?               @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted          Boolean                 @map("IsDeleted")
+  encodedPolyline    String?                 @map("EncodedPolyline")
+  distanceMeters     Int?                    @map("DistanceMeters")
+  durationSeconds    Int?                    @map("DurationSeconds")
+  boundsMinLatitude  Float?                  @map("BoundsMinLatitude")
+  boundsMaxLatitude  Float?                  @map("BoundsMaxLatitude")
+  boundsMinLongitude Float?                  @map("BoundsMinLongitude")
+  boundsMaxLongitude Float?                  @map("BoundsMaxLongitude")
+  waitlistEntries    LandingWaitlistEntry[]
+  pricingRules       PricingRule[]
+  mappedDemandStates RouteDemandGroupState[] @relation("DemandMappedRoute")
+  stops              Stop[]
+  trips              Trip[]
+
+  @@map("RoutesSet")
+}
+
+model Stop {
+  id        String    @id(map: "PK_StopsSet") @map("Id") @db.Uuid
+  routeId   String    @map("RouteId") @db.Uuid
+  name      String    @map("Name")
+  latitude  Float     @map("Latitude")
+  longitude Float     @map("Longitude")
+  order     Int       @map("Order")
+  createdAt DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted Boolean   @map("IsDeleted")
+  route     Route     @relation(fields: [routeId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_StopsSet_RoutesSet_RouteId")
+
+  @@index([routeId], map: "IX_StopsSet_RouteId")
+  @@map("StopsSet")
+}
+
+model Trip {
+  id             String          @id(map: "PK_TripsSet") @map("Id") @db.Uuid
+  routeId        String          @map("RouteId") @db.Uuid
+  driverId       String?         @map("DriverId") @db.Uuid
+  status         Int             @map("Status")
+  scheduledAt    DateTime        @map("ScheduledAt") @db.Timestamptz(6)
+  startedAt      DateTime?       @map("StartedAt") @db.Timestamptz(6)
+  completedAt    DateTime?       @map("CompletedAt") @db.Timestamptz(6)
+  pricePerSeat   Decimal         @map("PricePerSeat") @db.Decimal(18, 2)
+  availableSeats Int             @map("AvailableSeats")
+  referenceCode  String?         @map("ReferenceCode")
+  createdAt      DateTime        @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt      DateTime?       @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted      Boolean         @map("IsDeleted")
+  bookings       Booking[]
+  supportTickets SupportTicket[]
+  driver         Driver?         @relation(fields: [driverId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "FK_TripsSet_DriversSet_DriverId")
+  route          Route           @relation(fields: [routeId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_TripsSet_RoutesSet_RouteId")
+
+  @@index([driverId], map: "IX_TripsSet_DriverId")
+  @@index([routeId], map: "IX_TripsSet_RouteId")
+  @@map("TripsSet")
+}
+
+model Booking {
+  id                     String    @id(map: "PK_BookingsSet") @map("Id") @db.Uuid
+  tripId                 String    @map("TripId") @db.Uuid
+  userId                 String    @map("UserId") @db.Uuid
+  status                 Int       @map("Status")
+  seatCount              Int       @map("SeatCount")
+  totalAmount            Decimal   @map("TotalAmount") @db.Decimal(18, 2)
+  paymentMethod          String    @map("PaymentMethod")
+  referenceCode          String?   @map("ReferenceCode")
+  createdAt              DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt              DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted              Boolean   @map("IsDeleted")
+  captainEarnings        Decimal   @default(0.0) @map("CaptainEarnings") @db.Decimal(18, 2)
+  commissionAmount       Decimal   @default(0.0) @map("CommissionAmount") @db.Decimal(18, 2)
+  commissionRate         Decimal   @default(0.0) @map("CommissionRate") @db.Decimal(9, 6)
+  pricePerSeat           Decimal   @default(0.0) @map("PricePerSeat") @db.Decimal(18, 2)
+  usesSubscriptionCredit Boolean   @default(false) @map("UsesSubscriptionCredit")
+  trip                   Trip      @relation(fields: [tripId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_BookingsSet_TripsSet_TripId")
+  user                   User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_BookingsSet_UsersSet_UserId")
+  invoice                Invoice?
+
+  @@index([tripId], map: "IX_BookingsSet_TripId")
+  @@index([userId], map: "IX_BookingsSet_UserId")
+  @@map("BookingsSet")
+}
+
+model Invoice {
+  id               String    @id(map: "PK_InvoicesSet") @map("Id") @db.Uuid
+  bookingId        String    @unique(map: "IX_InvoicesSet_BookingId") @map("BookingId") @db.Uuid
+  amount           Decimal   @map("Amount") @db.Decimal(18, 2)
+  status           Int       @map("Status")
+  paymentReference String?   @map("PaymentReference")
+  paidAt           DateTime? @map("PaidAt") @db.Timestamptz(6)
+  createdAt        DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt        DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted        Boolean   @map("IsDeleted")
+  booking          Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_InvoicesSet_BookingsSet_BookingId")
+
+  @@map("InvoicesSet")
+}
+
+model Wallet {
+  id           String              @id(map: "PK_WalletsSet") @map("Id") @db.Uuid
+  userId       String              @unique(map: "IX_WalletsSet_UserId") @map("UserId") @db.Uuid
+  balance      Decimal             @map("Balance") @db.Decimal
+  currency     String              @map("Currency")
+  createdAt    DateTime            @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt    DateTime?           @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted    Boolean             @map("IsDeleted")
+  transactions WalletTransaction[]
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_WalletsSet_UsersSet_UserId")
+
+  @@map("WalletsSet")
+}
+
+model WalletTransaction {
+  id          String    @id(map: "PK_WalletTransactionsSet") @map("Id") @db.Uuid
+  walletId    String    @map("WalletId") @db.Uuid
+  amount      Decimal   @map("Amount") @db.Decimal
+  type        String    @map("Type")
+  description String?   @map("Description")
+  reference   String?   @map("Reference")
+  createdAt   DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt   DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted   Boolean   @map("IsDeleted")
+  wallet      Wallet    @relation(fields: [walletId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_WalletTransactionsSet_WalletsSet_WalletId")
+
+  @@index([walletId], map: "IX_WalletTransactionsSet_WalletId")
+  @@map("WalletTransactionsSet")
+}
+
+model Review {
+  id        String    @id(map: "PK_ReviewsSet") @map("Id") @db.Uuid
+  tripId    String    @map("TripId") @db.Uuid
+  userId    String    @map("UserId") @db.Uuid
+  driverId  String?   @map("DriverId") @db.Uuid
+  stars     Int       @map("Stars")
+  comment   String?   @map("Comment")
+  createdAt DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted Boolean   @map("IsDeleted")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_ReviewsSet_UsersSet_UserId")
+
+  @@index([userId], map: "IX_ReviewsSet_UserId")
+  @@map("ReviewsSet")
+}
+
+model Notification {
+  id        String    @id(map: "PK_NotificationsSet") @map("Id") @db.Uuid
+  userId    String    @map("UserId") @db.Uuid
+  title     String    @map("Title")
+  body      String    @map("Body")
+  type      String?   @map("Type")
+  isRead    Boolean   @map("IsRead")
+  readAt    DateTime? @map("ReadAt") @db.Timestamptz(6)
+  createdAt DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted Boolean   @map("IsDeleted")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_NotificationsSet_UsersSet_UserId")
+
+  @@index([userId], map: "IX_NotificationsSet_UserId")
+  @@map("NotificationsSet")
+}
+
+model UserDevice {
+  id         String    @id(map: "PK_UserDevicesSet") @map("Id") @db.Uuid
+  userId     String    @map("UserId") @db.Uuid
+  token      String    @map("Token") @db.VarChar(512)
+  platform   String    @map("Platform") @db.VarChar(32)
+  isActive   Boolean   @map("IsActive")
+  lastSeenAt DateTime? @map("LastSeenAt") @db.Timestamptz(6)
+  createdAt  DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt  DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted  Boolean   @map("IsDeleted")
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_UserDevicesSet_UsersSet_UserId")
+
+  @@unique([userId, token], map: "IX_UserDevicesSet_UserId_Token")
+  @@index([token], map: "IX_UserDevicesSet_Token")
+  @@index([userId], map: "IX_UserDevicesSet_UserId")
+  @@map("UserDevicesSet")
+}
+
+model FaqItem {
+  id        String    @id(map: "PK_FaqItemsSet") @map("Id") @db.Uuid
+  question  String    @map("Question")
+  answer    String    @map("Answer")
+  order     Int       @map("Order")
+  isActive  Boolean   @map("IsActive")
+  createdAt DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted Boolean   @map("IsDeleted")
+
+  @@map("FaqItemsSet")
+}
+
+model LegalDocument {
+  id        String    @id(map: "PK_LegalDocumentsSet") @map("Id") @db.Uuid
+  slug      String    @unique(map: "IX_LegalDocumentsSet_Slug") @map("Slug")
+  title     String    @map("Title")
+  content   String    @map("Content")
+  isActive  Boolean   @map("IsActive")
+  createdAt DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted Boolean   @map("IsDeleted")
+  contentEn String?   @map("ContentEn")
+  titleEn   String?   @map("TitleEn")
+
+  @@map("LegalDocumentsSet")
+}
+
+model SupportTicket {
+  id        String           @id(map: "PK_SupportTicketsSet") @map("Id") @db.Uuid
+  userId    String           @map("UserId") @db.Uuid
+  subject   String           @map("Subject")
+  status    String           @map("Status")
+  closedAt  DateTime?        @map("ClosedAt") @db.Timestamptz(6)
+  createdAt DateTime         @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt DateTime?        @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted Boolean          @map("IsDeleted")
+  tripId    String?          @map("TripId") @db.Uuid
+  messages  SupportMessage[]
+  trip      Trip?            @relation(fields: [tripId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "FK_SupportTicketsSet_TripsSet_TripId")
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_SupportTicketsSet_UsersSet_UserId")
+
+  @@index([tripId], map: "IX_SupportTicketsSet_TripId")
+  @@index([userId], map: "IX_SupportTicketsSet_UserId")
+  @@map("SupportTicketsSet")
+}
+
+model SupportMessage {
+  id            String        @id(map: "PK_SupportMessagesSet") @map("Id") @db.Uuid
+  ticketId      String        @map("TicketId") @db.Uuid
+  senderId      String        @map("SenderId") @db.Uuid
+  isFromSupport Boolean       @map("IsFromSupport")
+  content       String        @map("Content")
+  createdAt     DateTime      @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt     DateTime?     @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted     Boolean       @map("IsDeleted")
+  ticket        SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_SupportMessagesSet_SupportTicketsSet_TicketId")
+
+  @@index([ticketId], map: "IX_SupportMessagesSet_TicketId")
+  @@map("SupportMessagesSet")
+}
+
+model RouteRequest {
+  id                   String    @id(map: "PK_RouteRequestsSet") @map("Id") @db.Uuid
+  userId               String    @map("UserId") @db.Uuid
+  fromAddress          String    @map("FromAddress")
+  toAddress            String    @map("ToAddress")
+  fromLatitude         Float     @map("FromLatitude")
+  fromLongitude        Float     @map("FromLongitude")
+  toLatitude           Float     @map("ToLatitude")
+  toLongitude          Float     @map("ToLongitude")
+  status               String    @map("Status")
+  notes                String?   @map("Notes")
+  createdAt            DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt            DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted            Boolean   @map("IsDeleted")
+  preferredVehicleType String    @default("") @map("PreferredVehicleType")
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_RouteRequestsSet_UsersSet_UserId")
+
+  @@index([userId], map: "IX_RouteRequestsSet_UserId")
+  @@map("RouteRequestsSet")
+}
+
+model SubscriptionPackage {
+  id           String    @id(map: "PK_SubscriptionPackagesSet") @map("Id") @db.Uuid
+  name         String    @map("Name")
+  description  String?   @map("Description")
+  price        Decimal   @map("Price") @db.Decimal
+  tripCount    Int       @map("TripCount")
+  validityDays Int       @map("ValidityDays")
+  isActive     Boolean   @map("IsActive")
+  createdAt    DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt    DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted    Boolean   @map("IsDeleted")
+
+  @@map("SubscriptionPackagesSet")
+}
+
+model LandingRouteLead {
+  id          String    @id(map: "PK_LandingRouteLeadsSet") @map("Id") @db.Uuid
+  phone       String    @map("Phone")
+  fromCity    String    @map("FromCity")
+  fromRegion  String    @map("FromRegion")
+  fromTime    String?   @map("FromTime")
+  toCity      String    @map("ToCity")
+  toRegion    String    @map("ToRegion")
+  toTime      String?   @map("ToTime")
+  weeklyCount Int       @map("WeeklyCount")
+  usageDays   String?   @map("UsageDays")
+  usageReason String?   @map("UsageReason")
+  source      String    @map("Source")
+  createdAt   DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt   DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted   Boolean   @map("IsDeleted")
+
+  @@map("LandingRouteLeadsSet")
+}
+
+model LandingWaitlistEntry {
+  id        String    @id(map: "PK_LandingWaitlistEntriesSet") @map("Id") @db.Uuid
+  phone     String    @map("Phone")
+  fullName  String?   @map("FullName")
+  source    String    @map("Source")
+  createdAt DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted Boolean   @map("IsDeleted")
+  routeFrom String?   @map("RouteFrom")
+  routeId   String?   @map("RouteId") @db.Uuid
+  routeTo   String?   @map("RouteTo")
+  route     Route?    @relation(fields: [routeId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "FK_LandingWaitlistEntriesSet_RoutesSet_RouteId")
+
+  @@index([routeId], map: "IX_LandingWaitlistEntriesSet_RouteId")
+  @@map("LandingWaitlistEntriesSet")
+}
+
+model LandingCaptainLead {
+  id          String    @id(map: "PK_LandingCaptainLeadsSet") @map("Id") @db.Uuid
+  phone       String    @map("Phone")
+  fullName    String?   @map("FullName")
+  vehicleType String?   @map("VehicleType")
+  notes       String?   @map("Notes")
+  source      String    @map("Source")
+  createdAt   DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt   DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted   Boolean   @map("IsDeleted")
+
+  @@map("LandingCaptainLeadsSet")
+}
+
+model RouteDemandGroupState {
+  id               String    @id(map: "PK_RouteDemandGroupStatesSet") @map("Id") @db.Uuid
+  routeKey         String    @unique(map: "IX_RouteDemandGroupStatesSet_RouteKey") @map("RouteKey")
+  status           String    @map("Status")
+  assignedDriverId String?   @map("AssignedDriverId") @db.Uuid
+  adminNotes       String?   @map("AdminNotes")
+  createdAt        DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt        DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted        Boolean   @map("IsDeleted")
+  mappedAt         DateTime? @map("MappedAt") @db.Timestamptz(6)
+  mappedByUserId   String?   @map("MappedByUserId") @db.Uuid
+  mappedRouteId    String?   @map("MappedRouteId") @db.Uuid
+  assignedDriver   Driver?   @relation("DemandAssignedDriver", fields: [assignedDriverId], references: [id], onUpdate: NoAction, map: "FK_RouteDemandGroupStatesSet_DriversSet_AssignedDriverId")
+  mappedRoute      Route?    @relation("DemandMappedRoute", fields: [mappedRouteId], references: [id], onUpdate: NoAction, map: "FK_RouteDemandGroupStatesSet_RoutesSet_MappedRouteId")
+
+  @@index([assignedDriverId], map: "IX_RouteDemandGroupStatesSet_AssignedDriverId")
+  @@index([mappedRouteId], map: "IX_RouteDemandGroupStatesSet_MappedRouteId")
+  @@map("RouteDemandGroupStatesSet")
+}
+
+model CommissionRule {
+  id                        String    @id(map: "PK_CommissionRulesSet") @map("Id") @db.Uuid
+  name                      String    @map("Name") @db.VarChar(128)
+  platformCommissionPercent Decimal   @map("PlatformCommissionPercent") @db.Decimal(9, 4)
+  effectiveFrom             DateTime? @map("EffectiveFrom") @db.Timestamptz(6)
+  effectiveTo               DateTime? @map("EffectiveTo") @db.Timestamptz(6)
+  isActive                  Boolean   @map("IsActive")
+  createdAt                 DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt                 DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted                 Boolean   @map("IsDeleted")
+
+  @@map("CommissionRulesSet")
+}
+
+model PricingRule {
+  id                         String    @id(map: "PK_PricingRulesSet") @map("Id") @db.Uuid
+  name                       String    @map("Name") @db.VarChar(128)
+  routeId                    String?   @map("RouteId") @db.Uuid
+  vehicleType                Int       @map("VehicleType")
+  oneWayPrice                Decimal   @map("OneWayPrice") @db.Decimal(18, 2)
+  roundTripPrice             Decimal   @map("RoundTripPrice") @db.Decimal(18, 2)
+  weeklyPrice                Decimal   @map("WeeklyPrice") @db.Decimal(18, 2)
+  monthlyPrice               Decimal   @map("MonthlyPrice") @db.Decimal(18, 2)
+  launchCommissionPercent    Decimal   @map("LaunchCommissionPercent") @db.Decimal(9, 4)
+  permanentCommissionPercent Decimal   @map("PermanentCommissionPercent") @db.Decimal(9, 4)
+  launchPeriodDays           Int       @map("LaunchPeriodDays")
+  launchStartAt              DateTime? @map("LaunchStartAt") @db.Timestamptz(6)
+  minimumLaunchRiders        Int       @map("MinimumLaunchRiders")
+  targetOccupancy            Int       @map("TargetOccupancy")
+  effectiveFrom              DateTime? @map("EffectiveFrom") @db.Timestamptz(6)
+  effectiveTo                DateTime? @map("EffectiveTo") @db.Timestamptz(6)
+  isActive                   Boolean   @map("IsActive")
+  createdAt                  DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt                  DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted                  Boolean   @map("IsDeleted")
+  route                      Route?    @relation(fields: [routeId], references: [id], onUpdate: NoAction, map: "FK_PricingRulesSet_RoutesSet_RouteId")
+
+  @@index([effectiveFrom], map: "IX_PricingRulesSet_EffectiveFrom")
+  @@index([effectiveTo], map: "IX_PricingRulesSet_EffectiveTo")
+  @@index([routeId, vehicleType, isActive], map: "IX_PricingRulesSet_RouteId_VehicleType_IsActive")
+  @@map("PricingRulesSet")
+}
+
+model RideFareRule {
+  id            String        @id(map: "PK_RideFareRulesSet") @map("Id") @db.Uuid
+  name          String        @map("Name") @db.VarChar(128)
+  fromZoneKey   String?       @map("FromZoneKey") @db.VarChar(64)
+  toZoneKey     String?       @map("ToZoneKey") @db.VarChar(64)
+  flatFare      Decimal       @map("FlatFare") @db.Decimal(18, 2)
+  effectiveFrom DateTime?     @map("EffectiveFrom") @db.Timestamptz(6)
+  effectiveTo   DateTime?     @map("EffectiveTo") @db.Timestamptz(6)
+  isActive      Boolean       @map("IsActive")
+  createdAt     DateTime      @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt     DateTime?     @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted     Boolean       @map("IsDeleted")
+  baseFare      Decimal       @default(0.0) @map("BaseFare") @db.Decimal(18, 2)
+  maximumFare   Decimal?      @map("MaximumFare") @db.Decimal(18, 2)
+  minimumFare   Decimal?      @map("MinimumFare") @db.Decimal(18, 2)
+  pricePerKm    Decimal       @default(0.0) @map("PricePerKm") @db.Decimal(18, 2)
+  rideRequests  RideRequest[]
+
+  @@index([fromZoneKey, toZoneKey, isActive], map: "IX_RideFareRulesSet_FromZoneKey_ToZoneKey_IsActive")
+  @@map("RideFareRulesSet")
+}
+
+model GroupFareRule {
+  id              String         @id(map: "PK_GroupFareRulesSet") @map("Id") @db.Uuid
+  name            String         @map("Name") @db.VarChar(128)
+  fromZoneKey     String?        @map("FromZoneKey") @db.VarChar(64)
+  toZoneKey       String?        @map("ToZoneKey") @db.VarChar(64)
+  charterFlatFare Decimal        @map("CharterFlatFare") @db.Decimal(18, 2)
+  maxMembers      Int            @map("MaxMembers")
+  effectiveFrom   DateTime?      @map("EffectiveFrom") @db.Timestamptz(6)
+  effectiveTo     DateTime?      @map("EffectiveTo") @db.Timestamptz(6)
+  isActive        Boolean        @map("IsActive")
+  createdAt       DateTime       @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt       DateTime?      @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted       Boolean        @map("IsDeleted")
+  baseFare        Decimal        @default(0.0) @map("BaseFare") @db.Decimal(18, 2)
+  maximumFare     Decimal?       @map("MaximumFare") @db.Decimal(18, 2)
+  minimumFare     Decimal?       @map("MinimumFare") @db.Decimal(18, 2)
+  pricePerKm      Decimal        @default(0.0) @map("PricePerKm") @db.Decimal(18, 2)
+  groupRequests   GroupRequest[]
+
+  @@index([fromZoneKey, toZoneKey, isActive], map: "IX_GroupFareRulesSet_FromZoneKey_ToZoneKey_IsActive")
+  @@map("GroupFareRulesSet")
+}
+
+model RideRequest {
+  id                   String        @id(map: "PK_RideRequestsSet") @map("Id") @db.Uuid
+  riderUserId          String        @map("RiderUserId") @db.Uuid
+  pickupLatitude       Float         @map("PickupLatitude")
+  pickupLongitude      Float         @map("PickupLongitude")
+  pickupAddress        String?       @map("PickupAddress") @db.VarChar(512)
+  destinationLatitude  Float         @map("DestinationLatitude")
+  destinationLongitude Float         @map("DestinationLongitude")
+  destinationAddress   String?       @map("DestinationAddress") @db.VarChar(512)
+  fromZoneKey          String?       @map("FromZoneKey") @db.VarChar(64)
+  toZoneKey            String?       @map("ToZoneKey") @db.VarChar(64)
+  rideFareRuleId       String?       @map("RideFareRuleId") @db.Uuid
+  status               Int           @map("Status")
+  fareAmount           Decimal       @map("FareAmount") @db.Decimal(18, 2)
+  commissionRate       Decimal       @map("CommissionRate") @db.Decimal(9, 6)
+  commissionAmount     Decimal       @map("CommissionAmount") @db.Decimal(18, 2)
+  captainEarnings      Decimal       @map("CaptainEarnings") @db.Decimal(18, 2)
+  totalAmount          Decimal       @map("TotalAmount") @db.Decimal(18, 2)
+  paymentMethod        String        @map("PaymentMethod") @db.VarChar(32)
+  isCashConfirmed      Boolean       @map("IsCashConfirmed")
+  driverId             String?       @map("DriverId") @db.Uuid
+  assignedAt           DateTime?     @map("AssignedAt") @db.Timestamptz(6)
+  startedAt            DateTime?     @map("StartedAt") @db.Timestamptz(6)
+  completedAt          DateTime?     @map("CompletedAt") @db.Timestamptz(6)
+  cancelledAt          DateTime?     @map("CancelledAt") @db.Timestamptz(6)
+  referenceCode        String?       @map("ReferenceCode") @db.VarChar(32)
+  createdAt            DateTime      @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt            DateTime?     @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted            Boolean       @map("IsDeleted")
+  baseFareApplied      Decimal?      @map("BaseFareApplied") @db.Decimal(18, 2)
+  distanceKm           Decimal?      @map("DistanceKm") @db.Decimal(18, 2)
+  minimumFareApplied   Decimal?      @map("MinimumFareApplied") @db.Decimal(18, 2)
+  pricePerKmApplied    Decimal?      @map("PricePerKmApplied") @db.Decimal(18, 2)
+  driver               Driver?       @relation(fields: [driverId], references: [id], onUpdate: NoAction, map: "FK_RideRequestsSet_DriversSet_DriverId")
+  rideFareRule         RideFareRule? @relation(fields: [rideFareRuleId], references: [id], onUpdate: NoAction, map: "FK_RideRequestsSet_RideFareRulesSet_RideFareRuleId")
+  rider                User          @relation("RideRider", fields: [riderUserId], references: [id], onUpdate: NoAction, map: "FK_RideRequestsSet_UsersSet_RiderUserId")
+
+  @@index([driverId], map: "IX_RideRequestsSet_DriverId")
+  @@index([rideFareRuleId], map: "IX_RideRequestsSet_RideFareRuleId")
+  @@index([riderUserId], map: "IX_RideRequestsSet_RiderUserId")
+  @@index([status], map: "IX_RideRequestsSet_Status")
+  @@map("RideRequestsSet")
+}
+
+model GroupRequest {
+  id                   String         @id(map: "PK_GroupRequestsSet") @map("Id") @db.Uuid
+  organizerUserId      String         @map("OrganizerUserId") @db.Uuid
+  pickupLatitude       Float          @map("PickupLatitude")
+  pickupLongitude      Float          @map("PickupLongitude")
+  pickupAddress        String?        @map("PickupAddress") @db.VarChar(512)
+  destinationLatitude  Float          @map("DestinationLatitude")
+  destinationLongitude Float          @map("DestinationLongitude")
+  destinationAddress   String?        @map("DestinationAddress") @db.VarChar(512)
+  fromZoneKey          String?        @map("FromZoneKey") @db.VarChar(64)
+  toZoneKey            String?        @map("ToZoneKey") @db.VarChar(64)
+  groupFareRuleId      String?        @map("GroupFareRuleId") @db.Uuid
+  capacity             Int            @map("Capacity")
+  joinedMemberCount    Int            @map("JoinedMemberCount")
+  status               Int            @map("Status")
+  fareAmount           Decimal        @map("FareAmount") @db.Decimal(18, 2)
+  commissionRate       Decimal        @map("CommissionRate") @db.Decimal(9, 6)
+  commissionAmount     Decimal        @map("CommissionAmount") @db.Decimal(18, 2)
+  captainEarnings      Decimal        @map("CaptainEarnings") @db.Decimal(18, 2)
+  totalAmount          Decimal        @map("TotalAmount") @db.Decimal(18, 2)
+  paymentMethod        String         @map("PaymentMethod") @db.VarChar(32)
+  isCashConfirmed      Boolean        @map("IsCashConfirmed")
+  membershipLocked     Boolean        @map("MembershipLocked")
+  driverId             String?        @map("DriverId") @db.Uuid
+  confirmedAt          DateTime?      @map("ConfirmedAt") @db.Timestamptz(6)
+  assignedAt           DateTime?      @map("AssignedAt") @db.Timestamptz(6)
+  startedAt            DateTime?      @map("StartedAt") @db.Timestamptz(6)
+  completedAt          DateTime?      @map("CompletedAt") @db.Timestamptz(6)
+  cancelledAt          DateTime?      @map("CancelledAt") @db.Timestamptz(6)
+  referenceCode        String?        @map("ReferenceCode") @db.VarChar(32)
+  createdAt            DateTime       @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt            DateTime?      @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted            Boolean        @map("IsDeleted")
+  baseFareApplied      Decimal?       @map("BaseFareApplied") @db.Decimal(18, 2)
+  distanceKm           Decimal?       @map("DistanceKm") @db.Decimal(18, 2)
+  minimumFareApplied   Decimal?       @map("MinimumFareApplied") @db.Decimal(18, 2)
+  pricePerKmApplied    Decimal?       @map("PricePerKmApplied") @db.Decimal(18, 2)
+  members              GroupMember[]
+  driver               Driver?        @relation(fields: [driverId], references: [id], onUpdate: NoAction, map: "FK_GroupRequestsSet_DriversSet_DriverId")
+  groupFareRule        GroupFareRule? @relation(fields: [groupFareRuleId], references: [id], onUpdate: NoAction, map: "FK_GroupRequestsSet_GroupFareRulesSet_GroupFareRuleId")
+  organizer            User           @relation("GroupOrganizer", fields: [organizerUserId], references: [id], onUpdate: NoAction, map: "FK_GroupRequestsSet_UsersSet_OrganizerUserId")
+
+  @@index([driverId], map: "IX_GroupRequestsSet_DriverId")
+  @@index([groupFareRuleId], map: "IX_GroupRequestsSet_GroupFareRuleId")
+  @@index([organizerUserId], map: "IX_GroupRequestsSet_OrganizerUserId")
+  @@index([status], map: "IX_GroupRequestsSet_Status")
+  @@map("GroupRequestsSet")
+}
+
+model GroupMember {
+  id             String       @id(map: "PK_GroupMembersSet") @map("Id") @db.Uuid
+  groupRequestId String       @map("GroupRequestId") @db.Uuid
+  userId         String       @map("UserId") @db.Uuid
+  isOrganizer    Boolean      @map("IsOrganizer")
+  joinedAt       DateTime     @map("JoinedAt") @db.Timestamptz(6)
+  createdAt      DateTime     @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt      DateTime?    @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted      Boolean      @map("IsDeleted")
+  groupRequest   GroupRequest @relation(fields: [groupRequestId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_GroupMembersSet_GroupRequestsSet_GroupRequestId")
+  user           User         @relation(fields: [userId], references: [id], onUpdate: NoAction, map: "FK_GroupMembersSet_UsersSet_UserId")
+
+  @@unique([groupRequestId, userId], map: "IX_GroupMembersSet_GroupRequestId_UserId")
+  @@index([userId], map: "IX_GroupMembersSet_UserId")
+  @@map("GroupMembersSet")
+}
+
+/// EF Core migrations history table — present on Neon. Keep mapped, unused by app code.
+model EfMigrationsHistory {
+  migrationId    String @id(map: "PK___EFMigrationsHistory") @map("MigrationId") @db.VarChar(150)
+  productVersion String @map("ProductVersion") @db.VarChar(32)
+
+  @@map("__EFMigrationsHistory")
+}

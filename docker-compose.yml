@@ -1,0 +1,12 @@
+# Shuttlez Node.js API — no local PostgreSQL.
+# The app uses the existing Neon database from DATABASE_URL.
+
+services:
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
