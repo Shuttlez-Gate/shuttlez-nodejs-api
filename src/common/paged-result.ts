@@ -52,9 +52,13 @@ export interface PageRequest {
 export const MAX_PAGE_SIZE = 200;
 
 export function pageRequestFrom(page?: number, pageSize?: number): PageRequest {
-  const safePage = page == null || page < 1 ? 1 : page;
+  const rawPage = Number(page);
+  const rawSize = Number(pageSize);
+  const safePage = !Number.isFinite(rawPage) || rawPage < 1 ? 1 : Math.floor(rawPage);
   const safeSize =
-    pageSize == null || pageSize < 1 ? 20 : Math.min(pageSize, MAX_PAGE_SIZE);
+    !Number.isFinite(rawSize) || rawSize < 1
+      ? 20
+      : Math.min(Math.floor(rawSize), MAX_PAGE_SIZE);
   return {
     page: safePage,
     pageSize: safeSize,

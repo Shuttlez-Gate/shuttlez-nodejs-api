@@ -53,15 +53,17 @@ const DEFAULT_ORIGINS = [
   'https://shuttlez-nodejs-api.vercel.app',
 ];
 
-const CORS_HEADERS = [
-  'Authorization',
-  'Content-Type',
-  'Accept',
-  'Accept-Language',
-  'Origin',
-  'X-Requested-With',
-  'X-Access-Token',
-];
+function isLocalDevOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    return (
+      (url.protocol === 'http:' || url.protocol === 'https:') &&
+      (url.hostname === 'localhost' || url.hostname === '127.0.0.1')
+    );
+  } catch {
+    return false;
+  }
+}
 
 export async function createNestApp(
   expressInstance?: Express,
@@ -75,16 +77,21 @@ export async function createNestApp(
 
   const config = app.get(ConfigService);
 
-  const origins = (config.get<string>('CORS_ALLOWED_ORIGINS') ?? '')
+  const envOrigins = (config.get<string>('CORS_ALLOWED_ORIGINS') ?? '')
     .split(',')
     .map((o) => o.trim())
     .filter(Boolean);
-  const allowed = origins.length > 0 ? origins : DEFAULT_ORIGINS;
+  const allowed = [...new Set([...DEFAULT_ORIGINS, ...envOrigins])];
 
   app.enableCors({
-    origin: allowed,
+    origin: (origin, callback) => {
+      if (!origin || allowed.includes(origin) || isLocalDevOrigin(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(null, false);
+    },
     credentials: true,
-    allowedHeaders: CORS_HEADERS,
     exposedHeaders: ['Content-Type'],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   });

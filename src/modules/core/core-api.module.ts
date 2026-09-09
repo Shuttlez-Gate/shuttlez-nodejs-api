@@ -46,6 +46,9 @@ import {
   AdminRideFareController,
 } from '../admin/admin-fares.controller';
 import { AdminRouteDemandController } from '../admin/admin-demand.controller';
+import { RouteDemandService } from '../admin/route-demand/route-demand.service';
+import { CorridorDemandService } from '../admin/corridor-demand.service';
+import { AdminDashboardService } from '../admin/dashboard.service';
 import {
   AdminDashboardController,
   AdminGroupsController,
@@ -93,6 +96,14 @@ import {
     AdminGroupsController,
     AdminDashboardController,
   ],
-  providers: [FareService, RidesService, GroupsService, DriversService],
+  providers: [
+    FareService,
+    RidesService,
+    GroupsService,
+    DriversService,
+    RouteDemandService,
+    CorridorDemandService,
+    AdminDashboardService,
+  ],
 })
 export class CoreApiModule {}

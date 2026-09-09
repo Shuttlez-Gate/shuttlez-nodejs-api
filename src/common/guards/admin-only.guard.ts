@@ -4,6 +4,8 @@ import {
   ForbiddenAppException,
   UnauthorizedAppException,
 } from '../exceptions/app.exception';
+import { extractBearer } from './optional-jwt.guard';
+import { UserType } from '../enums';
 
 const ROLE_CLAIM_TYPES = new Set([
   'role',
@@ -18,6 +20,11 @@ export class AdminOnlyGuard implements CanActivate {
     const user = request.user as Record<string, unknown> | undefined;
 
     if (!user) {
+      if (extractBearer(request) || request.jwtAuthFailed) {
+        throw new UnauthorizedAppException(
+          'رمز الدخول غير صالح أو منتهي. سجّل الدخول مرة أخرى من لوحة التحكم',
+        );
+      }
       throw new UnauthorizedAppException('يجب تسجيل الدخول كمسؤول');
     }
 
@@ -31,7 +38,10 @@ export class AdminOnlyGuard implements CanActivate {
 
 function isAdmin(user: Record<string, unknown>): boolean {
   const role = extractRole(user);
-  return role?.toLowerCase() === 'admin';
+  if (role?.toLowerCase() === 'admin' || role === String(UserType.Admin)) {
+    return true;
+  }
+  return user.userType === UserType.Admin;
 }
 
 export function extractRole(user: Record<string, unknown>): string | undefined {

@@ -24,6 +24,7 @@ import { parseGroupStatus, parseRideStatus } from '../../common/utils/enums-map'
 import { GroupRequestStatus, RideRequestStatus } from '../../common/enums';
 import { RidesService } from '../rides/rides.service';
 import { GroupsService } from '../groups/groups.service';
+import { AdminDashboardService } from './dashboard.service';
 
 @ApiTags('admin-support')
 @AdminOnly()
@@ -490,55 +491,10 @@ export class AdminGroupsController {
 @AdminOnly()
 @Controller('api/v1/admin/dashboard')
 export class AdminDashboardController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly dashboard: AdminDashboardService) {}
 
   @Get()
   async get(@Query('days') days = '30') {
-    const windowDays = Number(days) > 0 ? Number(days) : 30;
-    const from = new Date(Date.now() - windowDays * 86400000);
-    const [users, trips, bookings, revenueAgg] = await Promise.all([
-      this.prisma.user.count({ where: { isDeleted: false, createdAt: { gte: from } } }),
-      this.prisma.trip.count({ where: { isDeleted: false, createdAt: { gte: from } } }),
-      this.prisma.booking.count({ where: { isDeleted: false, createdAt: { gte: from } } }),
-      this.prisma.booking.aggregate({
-        where: { isDeleted: false, createdAt: { gte: from } },
-        _sum: { totalAmount: true },
-      }),
-    ]);
-    const tripBreakdown = await this.prisma.trip.groupBy({
-      by: ['status'],
-      where: { isDeleted: false, createdAt: { gte: from } },
-      _count: { _all: true },
-    });
-    const bookingBreakdown = await this.prisma.booking.groupBy({
-      by: ['status'],
-      where: { isDeleted: false, createdAt: { gte: from } },
-      _count: { _all: true },
-    });
-    return ApiResponse.ok({
-      metrics: [
-        { key: 'users', label: 'المستخدمون', value: users, previousValue: null, format: 'number' },
-        { key: 'trips', label: 'الرحلات', value: trips, previousValue: null, format: 'number' },
-        { key: 'bookings', label: 'الحجوزات', value: bookings, previousValue: null, format: 'number' },
-        {
-          key: 'revenue',
-          label: 'الإيراد',
-          value: Number(revenueAgg._sum.totalAmount ?? 0),
-          previousValue: null,
-          format: 'money',
-        },
-      ],
-      series: [],
-      tripStatusBreakdown: tripBreakdown.map((t) => ({
-        label: String(t.status),
-        value: t._count._all,
-      })),
-      bookingStatusBreakdown: bookingBreakdown.map((b) => ({
-        label: String(b.status),
-        value: b._count._all,
-      })),
-      topRoutes: [],
-      recentActivity: [],
-    });
+    return ApiResponse.ok(await this.dashboard.get(days));
   }
 }

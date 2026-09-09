@@ -14,6 +14,7 @@ import { Prisma } from '@prisma/client';
 import { ApiResponse } from '../../common/api-response';
 import { AdminOnly } from '../../common/decorators/admin-only.decorator';
 import { PrismaService } from '../../database/prisma/prisma.service';
+import { CorridorDemandService } from './corridor-demand.service';
 import { pageRequestFrom, PagedResult } from '../../common/paged-result';
 import { AppException, NotFoundException } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/error-codes';
@@ -33,7 +34,10 @@ import {
 @AdminOnly()
 @Controller('api/v1/admin/routes')
 export class AdminRoutesController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly corridorDemand: CorridorDemandService,
+  ) {}
 
   @Get()
   async list(
@@ -175,59 +179,16 @@ export class AdminRoutesController {
 
   @Get(':id/demand')
   async demand(@Param('id') id: string) {
-    const route = await this.requireRoute(id);
-    const requests = await this.prisma.routeRequest.findMany({
-      where: { isDeleted: false, status: { not: 'converted' } },
-    });
-    const nearby = requests.filter((r) => nearRoute(r, route));
-    return ApiResponse.ok({
-      routeId: route.id,
-      routeName: route.name,
-      matchingRequests: nearby.length,
-      items: nearby.map((r) => ({
-        id: r.id,
-        fromAddress: r.fromAddress,
-        toAddress: r.toAddress,
-        status: r.status,
-        createdAt: r.createdAt,
-      })),
-    });
+    return ApiResponse.ok(await this.corridorDemand.analyze(id));
   }
 
   @Post(':id/demand/apply')
   async applyDemand(
     @Param('id') id: string,
-    @Body() body?: { days?: number; pricePerSeat?: number; availableSeats?: number },
+    @Body() body?: { scheduledAt?: string | null; pricePerSeat?: number | null },
   ) {
-    const route = await this.requireRoute(id);
-    const days = body?.days ?? 7;
-    const price = body?.pricePerSeat ?? 0;
-    const seats = body?.availableSeats ?? 12;
-    let created = 0;
-    const start = utcNow();
-    for (let i = 0; i < days; i++) {
-      const scheduledAt = new Date(start.getTime() + i * 86400000);
-      scheduledAt.setUTCHours(7, 0, 0, 0);
-      await this.prisma.trip.create({
-        data: {
-          id: newId(),
-          routeId: route.id,
-          status: TripStatus.Scheduled,
-          scheduledAt,
-          pricePerSeat: new Prisma.Decimal(price),
-          availableSeats: seats,
-          referenceCode: refCode('TR'),
-          ...baseFields(),
-        },
-      });
-      created += 1;
-    }
-    await this.prisma.routeRequest.updateMany({
-      where: { isDeleted: false, status: 'pending' },
-      data: { status: 'converted', updatedAt: utcNow() },
-    });
     return ApiResponse.ok(
-      { createdTrips: created, routeId: route.id },
+      await this.corridorDemand.apply(id, body),
       'تم تشغيل التوزيع وإنشاء الرحلات',
     );
   }
@@ -969,19 +930,4 @@ function mapTrip(
     revenue,
     createdAt: t.createdAt,
   };
-}
-
-function nearRoute(
-  request: { fromLatitude: number; fromLongitude: number; toLatitude: number; toLongitude: number },
-  route: { startLatitude: number; startLongitude: number; endLatitude: number; endLongitude: number },
-) {
-  const d1 = Math.hypot(
-    request.fromLatitude - route.startLatitude,
-    request.fromLongitude - route.startLongitude,
-  );
-  const d2 = Math.hypot(
-    request.toLatitude - route.endLatitude,
-    request.toLongitude - route.endLongitude,
-  );
-  return d1 < 0.3 && d2 < 0.3;
 }

@@ -33,6 +33,7 @@ export class OptionalJwtGuard implements CanActivate {
       request.user = normalizePayload(payload);
     } catch {
       // Match .NET: do not fail the request for a bad token on public routes.
+      request.jwtAuthFailed = true;
     }
 
     return true;
@@ -41,14 +42,11 @@ export class OptionalJwtGuard implements CanActivate {
 
 export function extractBearer(request: Request): string | undefined {
   const header = request.headers.authorization;
-  if (!header) {
+  if (!header || typeof header !== 'string') {
     return undefined;
   }
-  const [scheme, value] = header.split(' ');
-  if (scheme?.toLowerCase() !== 'bearer' || !value) {
-    return undefined;
-  }
-  return value;
+  const match = header.match(/^Bearer\s+(\S+)/i);
+  return match?.[1];
 }
 
 function extractHubQueryToken(request: Request): string | undefined {
