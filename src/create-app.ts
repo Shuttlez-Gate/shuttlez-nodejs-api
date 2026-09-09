@@ -36,6 +36,14 @@ function resolveUploadDir(config: ConfigService): string {
 const DEFAULT_ORIGINS = [
   'https://shuttlez.org',
   'https://www.shuttlez.org',
+  'http://localhost:4200',
+  'https://localhost:4200',
+  'http://localhost:4300',
+  'https://localhost:4300',
+  'http://127.0.0.1:4200',
+  'https://127.0.0.1:4200',
+  'http://127.0.0.1:4300',
+  'https://127.0.0.1:4300',
   'https://shuttlez-dashboard.web.app',
   'https://shuttlez-dashboard.firebaseapp.com',
   'https://shuttlez-landing.web.app',
@@ -43,6 +51,16 @@ const DEFAULT_ORIGINS = [
   'https://shuttlez-api.web.app',
   'https://shuttlez-api.firebaseapp.com',
   'https://shuttlez-nodejs-api.vercel.app',
+];
+
+const CORS_HEADERS = [
+  'Authorization',
+  'Content-Type',
+  'Accept',
+  'Accept-Language',
+  'Origin',
+  'X-Requested-With',
+  'X-Access-Token',
 ];
 
 export async function createNestApp(
@@ -66,7 +84,8 @@ export async function createNestApp(
   app.enableCors({
     origin: allowed,
     credentials: true,
-    allowedHeaders: '*',
+    allowedHeaders: CORS_HEADERS,
+    exposedHeaders: ['Content-Type'],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   });
 

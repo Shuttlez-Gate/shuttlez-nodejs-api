@@ -26,6 +26,18 @@ export class PagedResult<T> {
     return this.page < this.totalPages;
   }
 
+  toJSON() {
+    return {
+      items: this.items,
+      page: this.page,
+      pageSize: this.pageSize,
+      totalCount: this.totalCount,
+      totalPages: this.totalPages,
+      hasPrevious: this.hasPrevious,
+      hasNext: this.hasNext,
+    };
+  }
+
   static empty<T>(page: number, pageSize: number): PagedResult<T> {
     return new PagedResult<T>([], page, pageSize, 0);
   }
