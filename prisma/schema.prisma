@@ -128,8 +128,10 @@ model Driver {
   vehicle            Vehicle?                @relation(fields: [vehicleId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "FK_DriversSet_VehiclesSet_VehicleId")
   groupRequests      GroupRequest[]
   rideRequests       RideRequest[]
-  assignedDemands    RouteDemandGroupState[] @relation("DemandAssignedDriver")
-  trips              Trip[]
+  assignedDemands       RouteDemandGroupState[] @relation("DemandAssignedDriver")
+  trips                 Trip[]
+  ownedRoutes           Route[]
+  cancellationRequests  CancellationRequest[]
 
   @@index([vehicleId], map: "IX_DriversSet_VehicleId")
   @@map("DriversSet")
@@ -188,52 +190,74 @@ model Route {
   boundsMaxLatitude  Float?                  @map("BoundsMaxLatitude")
   boundsMinLongitude Float?                  @map("BoundsMinLongitude")
   boundsMaxLongitude Float?                  @map("BoundsMaxLongitude")
+  ownerType          Int                     @default(0) @map("OwnerType")
+  ownerDriverId      String?                 @map("OwnerDriverId") @db.Uuid
+  publishStatus      Int                     @default(1) @map("PublishStatus")
+  shareToken         String?                 @unique(map: "IX_RoutesSet_ShareToken") @map("ShareToken") @db.VarChar(64)
+  vehicleKind        String?                 @map("VehicleKind")
+  capacity           Int?                    @map("Capacity")
   waitlistEntries    LandingWaitlistEntry[]
   pricingRules       PricingRule[]
   mappedDemandStates RouteDemandGroupState[] @relation("DemandMappedRoute")
   stops              Stop[]
   trips              Trip[]
+  ownerDriver        Driver?                 @relation(fields: [ownerDriverId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "FK_RoutesSet_DriversSet_OwnerDriverId")
 
+  @@index([ownerDriverId], map: "IX_RoutesSet_OwnerDriverId")
   @@map("RoutesSet")
 }
 
 model Stop {
-  id        String    @id(map: "PK_StopsSet") @map("Id") @db.Uuid
-  routeId   String    @map("RouteId") @db.Uuid
-  name      String    @map("Name")
-  latitude  Float     @map("Latitude")
-  longitude Float     @map("Longitude")
-  order     Int       @map("Order")
-  createdAt DateTime  @map("CreatedAt") @db.Timestamptz(6)
-  updatedAt DateTime? @map("UpdatedAt") @db.Timestamptz(6)
-  isDeleted Boolean   @map("IsDeleted")
-  route     Route     @relation(fields: [routeId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_StopsSet_RoutesSet_RouteId")
+  id                   String                 @id(map: "PK_StopsSet") @map("Id") @db.Uuid
+  routeId              String                  @map("RouteId") @db.Uuid
+  name                 String                 @map("Name")
+  latitude             Float                  @map("Latitude")
+  longitude            Float                  @map("Longitude")
+  order                Int                    @map("Order")
+  createdAt            DateTime               @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt            DateTime?             @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted            Boolean                @map("IsDeleted")
+  route                Route                  @relation(fields: [routeId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_StopsSet_RoutesSet_RouteId")
+  originBookings       Booking[]               @relation("BookingOriginStop")
+  destinationBookings  Booking[]               @relation("BookingDestinationStop")
+  fromSegments         TripSegmentInventory[] @relation("SegmentFromStop")
+  toSegments           TripSegmentInventory[] @relation("SegmentToStop")
 
   @@index([routeId], map: "IX_StopsSet_RouteId")
   @@map("StopsSet")
 }
 
 model Trip {
-  id             String          @id(map: "PK_TripsSet") @map("Id") @db.Uuid
-  routeId        String          @map("RouteId") @db.Uuid
-  driverId       String?         @map("DriverId") @db.Uuid
-  status         Int             @map("Status")
-  scheduledAt    DateTime        @map("ScheduledAt") @db.Timestamptz(6)
-  startedAt      DateTime?       @map("StartedAt") @db.Timestamptz(6)
-  completedAt    DateTime?       @map("CompletedAt") @db.Timestamptz(6)
-  pricePerSeat   Decimal         @map("PricePerSeat") @db.Decimal(18, 2)
-  availableSeats Int             @map("AvailableSeats")
-  referenceCode  String?         @map("ReferenceCode")
-  createdAt      DateTime        @map("CreatedAt") @db.Timestamptz(6)
-  updatedAt      DateTime?       @map("UpdatedAt") @db.Timestamptz(6)
-  isDeleted      Boolean         @map("IsDeleted")
-  bookings       Booking[]
-  supportTickets SupportTicket[]
-  driver         Driver?         @relation(fields: [driverId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "FK_TripsSet_DriversSet_DriverId")
-  route          Route           @relation(fields: [routeId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_TripsSet_RoutesSet_RouteId")
+  id                   String                  @id(map: "PK_TripsSet") @map("Id") @db.Uuid
+  routeId              String                  @map("RouteId") @db.Uuid
+  driverId             String?                 @map("DriverId") @db.Uuid
+  status               Int                     @map("Status")
+  scheduledAt          DateTime                @map("ScheduledAt") @db.Timestamptz(6)
+  startedAt            DateTime?               @map("StartedAt") @db.Timestamptz(6)
+  completedAt          DateTime?               @map("CompletedAt") @db.Timestamptz(6)
+  pricePerSeat         Decimal                 @map("PricePerSeat") @db.Decimal(18, 2)
+  availableSeats       Int                     @map("AvailableSeats")
+  referenceCode        String?                 @map("ReferenceCode")
+  createdAt            DateTime                @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt            DateTime?               @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted            Boolean                 @map("IsDeleted")
+  parentTripId         String?                 @map("ParentTripId") @db.Uuid
+  recurrenceKind       Int                     @default(0) @map("RecurrenceKind")
+  recurrenceDaysOfWeek String?                 @map("RecurrenceDaysOfWeek") @db.VarChar(32)
+  recurrenceStartDate  DateTime?               @map("RecurrenceStartDate") @db.Date
+  recurrenceEndDate    DateTime?               @map("RecurrenceEndDate") @db.Date
+  bookings             Booking[]
+  supportTickets       SupportTicket[]
+  driver               Driver?                 @relation(fields: [driverId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "FK_TripsSet_DriversSet_DriverId")
+  route                Route                   @relation(fields: [routeId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_TripsSet_RoutesSet_RouteId")
+  parentTrip           Trip?                   @relation("TripOccurrences", fields: [parentTripId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "FK_TripsSet_TripsSet_ParentTripId")
+  occurrences          Trip[]                  @relation("TripOccurrences")
+  segmentInventories   TripSegmentInventory[]
+  cancellationRequests CancellationRequest[]
 
   @@index([driverId], map: "IX_TripsSet_DriverId")
   @@index([routeId], map: "IX_TripsSet_RouteId")
+  @@index([parentTripId], map: "IX_TripsSet_ParentTripId")
   @@map("TripsSet")
 }
 
@@ -254,12 +278,18 @@ model Booking {
   commissionRate         Decimal   @default(0.0) @map("CommissionRate") @db.Decimal(9, 6)
   pricePerSeat           Decimal   @default(0.0) @map("PricePerSeat") @db.Decimal(18, 2)
   usesSubscriptionCredit Boolean   @default(false) @map("UsesSubscriptionCredit")
+  originStopId           String?   @map("OriginStopId") @db.Uuid
+  destinationStopId      String?   @map("DestinationStopId") @db.Uuid
   trip                   Trip      @relation(fields: [tripId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_BookingsSet_TripsSet_TripId")
   user                   User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_BookingsSet_UsersSet_UserId")
+  originStop             Stop?     @relation("BookingOriginStop", fields: [originStopId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "FK_BookingsSet_StopsSet_OriginStopId")
+  destinationStop        Stop?     @relation("BookingDestinationStop", fields: [destinationStopId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "FK_BookingsSet_StopsSet_DestinationStopId")
   invoice                Invoice?
 
   @@index([tripId], map: "IX_BookingsSet_TripId")
   @@index([userId], map: "IX_BookingsSet_UserId")
+  @@index([originStopId], map: "IX_BookingsSet_OriginStopId")
+  @@index([destinationStopId], map: "IX_BookingsSet_DestinationStopId")
   @@map("BookingsSet")
 }
 
@@ -436,6 +466,7 @@ model RouteRequest {
   updatedAt            DateTime? @map("UpdatedAt") @db.Timestamptz(6)
   isDeleted            Boolean   @map("IsDeleted")
   preferredVehicleType String    @default("") @map("PreferredVehicleType")
+  kind                 String    @default("request") @map("Kind") @db.VarChar(16)
   user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_RouteRequestsSet_UsersSet_UserId")
 
   @@index([userId], map: "IX_RouteRequestsSet_UserId")
@@ -732,4 +763,44 @@ model EfMigrationsHistory {
   productVersion String @map("ProductVersion") @db.VarChar(32)
 
   @@map("__EFMigrationsHistory")
+}
+
+model TripSegmentInventory {
+  id             String    @id(map: "PK_TripSegmentInventorySet") @map("Id") @db.Uuid
+  tripId         String    @map("TripId") @db.Uuid
+  fromStopId     String    @map("FromStopId") @db.Uuid
+  toStopId       String    @map("ToStopId") @db.Uuid
+  fromOrder      Int       @map("FromOrder")
+  toOrder        Int       @map("ToOrder")
+  capacity       Int       @map("Capacity")
+  remainingSeats Int       @map("RemainingSeats")
+  createdAt      DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt      DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted      Boolean   @map("IsDeleted")
+  trip           Trip      @relation(fields: [tripId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_TripSegmentInventorySet_TripsSet_TripId")
+  fromStop       Stop      @relation("SegmentFromStop", fields: [fromStopId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "FK_TripSegmentInventorySet_StopsSet_FromStopId")
+  toStop         Stop      @relation("SegmentToStop", fields: [toStopId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "FK_TripSegmentInventorySet_StopsSet_ToStopId")
+
+  @@unique([tripId, fromStopId, toStopId], map: "IX_TripSegmentInventorySet_Trip_From_To")
+  @@index([tripId], map: "IX_TripSegmentInventorySet_TripId")
+  @@map("TripSegmentInventorySet")
+}
+
+model CancellationRequest {
+  id         String    @id(map: "PK_CancellationRequestsSet") @map("Id") @db.Uuid
+  tripId     String    @map("TripId") @db.Uuid
+  driverId   String    @map("DriverId") @db.Uuid
+  reason     String?   @map("Reason")
+  status     Int       @default(0) @map("Status")
+  adminNotes String?   @map("AdminNotes")
+  createdAt  DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt  DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted  Boolean   @map("IsDeleted")
+  trip       Trip      @relation(fields: [tripId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_CancellationRequestsSet_TripsSet_TripId")
+  driver     Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_CancellationRequestsSet_DriversSet_DriverId")
+
+  @@index([tripId], map: "IX_CancellationRequestsSet_TripId")
+  @@index([driverId], map: "IX_CancellationRequestsSet_DriverId")
+  @@index([status], map: "IX_CancellationRequestsSet_Status")
+  @@map("CancellationRequestsSet")
 }

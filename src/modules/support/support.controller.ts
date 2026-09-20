@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/comm
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { ApiResponse } from '../../common/api-response';
 import { CurrentUserService } from '../../common/current-user.service';
-import { NotFoundException } from '../../common/exceptions/app.exception';
+import { AppException, NotFoundException } from '../../common/exceptions/app.exception';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { baseFields } from '../../common/utils/entity-defaults';
 import { newId, utcNow } from '../../common/utils/date.util';
@@ -120,9 +120,14 @@ export class RouteRequestsController {
       toLongitude: number;
       notes?: string;
       preferredVehicleType?: string;
+      kind?: string;
     },
   ) {
     const userId = this.currentUser.requireUserId();
+    const kind = (body.kind ?? 'request').trim().toLowerCase();
+    if (kind !== 'notify' && kind !== 'request') {
+      throw new AppException('نوع الطلب غير صالح', 400);
+    }
     const created = await this.prisma.routeRequest.create({
       data: {
         id: newId(),
@@ -136,12 +141,14 @@ export class RouteRequestsController {
         status: 'pending',
         notes: body.notes,
         preferredVehicleType: body.preferredVehicleType ?? '',
+        kind,
         ...baseFields(),
       },
     });
     return ApiResponse.ok({
       id: created.id,
       status: created.status,
+      kind: created.kind,
     });
   }
 }

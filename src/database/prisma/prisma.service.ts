@@ -62,4 +62,8 @@ export class PrismaService
   async acquireTransactionAdvisoryLock(lockKey: bigint | number): Promise<void> {
     await this.$executeRaw`SELECT pg_advisory_xact_lock(${lockKey})`;
   }
+
+  async lockTrip(tripId: string): Promise<void> {
+    await this.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${tripId}))`;
+  }
 }

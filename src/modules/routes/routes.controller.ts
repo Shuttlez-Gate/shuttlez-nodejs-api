@@ -5,6 +5,8 @@ import { AppException, NotFoundException } from '../../common/exceptions/app.exc
 import { ErrorCodes } from '../../common/error-codes';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { splitRouteName } from '../landing/landing.service';
+import { CaptainRoutesService } from '../marketplace/captain-routes.service';
+import { RouteOwnerType, RoutePublishStatus } from '../../common/enums';
 
 const badgePalette = [
   [uncheckedInt(0xff95feb3), uncheckedInt(0xff42ff78)],
@@ -15,12 +17,20 @@ const badgePalette = [
 @ApiTags('routes')
 @Controller('api/v1/routes')
 export class RoutesController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly captainRoutes: CaptainRoutesService,
+  ) {}
 
   @Get()
   async list() {
     const routes = await this.prisma.route.findMany({
-      where: { isActive: true, isDeleted: false },
+      where: {
+        isActive: true,
+        isDeleted: false,
+        ownerType: RouteOwnerType.Platform,
+        publishStatus: RoutePublishStatus.Published,
+      },
       orderBy: { name: 'asc' },
       include: { stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } } },
     });
@@ -42,6 +52,17 @@ export class RoutesController {
         };
       }),
     );
+  }
+
+  @Get('shared/:token')
+  async shared(@Param('token') token: string) {
+    return ApiResponse.ok(await this.captainRoutes.getShared(token));
+  }
+
+  /** Rider-facing catalog of published captain routes (Figma: Captain Routes). */
+  @Get('captain')
+  async listCaptainRoutes() {
+    return ApiResponse.ok(await this.captainRoutes.listPublishedForRiders());
   }
 
   @Get(':id/timeline')

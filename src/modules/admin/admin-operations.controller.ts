@@ -15,6 +15,7 @@ import { ApiResponse } from '../../common/api-response';
 import { AdminOnly } from '../../common/decorators/admin-only.decorator';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { CorridorDemandService } from './corridor-demand.service';
+import { CaptainRoutesService } from '../marketplace/captain-routes.service';
 import { pageRequestFrom, PagedResult } from '../../common/paged-result';
 import { AppException, NotFoundException } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/error-codes';
@@ -43,6 +44,7 @@ export class AdminRoutesController {
   async list(
     @Query('search') search?: string,
     @Query('isActive') isActive?: string,
+    @Query('ownerType') ownerType?: string,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
@@ -51,6 +53,9 @@ export class AdminRoutesController {
       isDeleted: false,
       ...(isActive != null && isActive !== ''
         ? { isActive: isActive === 'true' }
+        : {}),
+      ...(ownerType != null && ownerType !== ''
+        ? { ownerType: Number(ownerType) }
         : {}),
       ...(search
         ? {
@@ -621,6 +626,7 @@ export class AdminRouteRequestsController {
   async list(
     @Query('search') search?: string,
     @Query('status') status?: string,
+    @Query('kind') kind?: string,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
@@ -628,6 +634,7 @@ export class AdminRouteRequestsController {
     const where: Prisma.RouteRequestWhereInput = {
       isDeleted: false,
       ...(status ? { status } : {}),
+      ...(kind ? { kind } : {}),
       ...(search
         ? {
             OR: [
@@ -658,6 +665,7 @@ export class AdminRouteRequestsController {
           fromAddress: r.fromAddress,
           toAddress: r.toAddress,
           status: r.status,
+          kind: r.kind,
           preferredVehicleType: r.preferredVehicleType,
           fromLatitude: r.fromLatitude,
           fromLongitude: r.fromLongitude,
@@ -702,6 +710,7 @@ export class AdminRouteRequestsController {
         fromAddress: updated.fromAddress,
         toAddress: updated.toAddress,
         status: updated.status,
+        kind: updated.kind,
         preferredVehicleType: updated.preferredVehicleType,
         fromLatitude: updated.fromLatitude,
         fromLongitude: updated.fromLongitude,
@@ -882,6 +891,9 @@ function mapRoute(r: {
   distanceMeters: number | null;
   durationSeconds: number | null;
   isActive: boolean;
+  ownerType: number;
+  ownerDriverId: string | null;
+  publishStatus: number;
   createdAt: Date;
   _count: { stops: number; trips: number };
 }) {
@@ -897,6 +909,9 @@ function mapRoute(r: {
     distanceMeters: r.distanceMeters,
     durationSeconds: r.durationSeconds,
     isActive: r.isActive,
+    ownerType: r.ownerType,
+    ownerDriverId: r.ownerDriverId,
+    publishStatus: r.publishStatus,
     stopCount: r._count.stops,
     tripCount: r._count.trips,
     createdAt: r.createdAt,
@@ -930,4 +945,33 @@ function mapTrip(
     revenue,
     createdAt: t.createdAt,
   };
+}
+
+@ApiTags('admin-cancellation-requests')
+@AdminOnly()
+@Controller('api/v1/admin/cancellation-requests')
+export class AdminCancellationRequestsController {
+  constructor(private readonly captainRoutes: CaptainRoutesService) {}
+
+  @Get()
+  async list(@Query('status') status?: string) {
+    const parsed =
+      status == null || status === '' ? undefined : Number(status);
+    return ApiResponse.ok(
+      await this.captainRoutes.listCancellationRequests(
+        Number.isFinite(parsed) ? parsed : undefined,
+      ),
+    );
+  }
+
+  @Patch(':id/status')
+  async updateStatus(
+    @Param('id') id: string,
+    @Body() body: { status: string; adminNotes?: string },
+  ) {
+    return ApiResponse.ok(
+      await this.captainRoutes.reviewCancellation(id, body.status, body.adminNotes),
+      'تم تحديث طلب الإلغاء',
+    );
+  }
 }

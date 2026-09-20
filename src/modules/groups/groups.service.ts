@@ -192,7 +192,7 @@ export class GroupsService {
       this.prisma.groupMember.create({
         data: {
           id: newId(),
-          groupRequestId: groupId,
+          groupRequestId: group.id,
           userId,
           isOrganizer: false,
           joinedAt: utcNow(),
@@ -200,14 +200,14 @@ export class GroupsService {
         },
       }),
       this.prisma.groupRequest.update({
-        where: { id: groupId },
+        where: { id: group.id },
         data: {
           joinedMemberCount: { increment: 1 },
           updatedAt: utcNow(),
         },
       }),
     ]);
-    return this.byId(groupId);
+    return this.byId(group.id);
   }
 
   async leave(groupId: string) {
@@ -237,11 +237,11 @@ export class GroupsService {
         data: { isDeleted: true, updatedAt: utcNow() },
       }),
       this.prisma.groupRequest.update({
-        where: { id: groupId },
+        where: { id: group.id },
         data: { joinedMemberCount: { decrement: 1 }, updatedAt: utcNow() },
       }),
     ]);
-    return this.byId(groupId);
+    return this.byId(group.id);
   }
 
   async confirm(groupId: string, paymentMethod?: string) {
@@ -260,7 +260,7 @@ export class GroupsService {
       );
     }
     await this.prisma.groupRequest.update({
-      where: { id: groupId },
+      where: { id: group.id },
       data: {
         status: GroupRequestStatus.Confirmed,
         isCashConfirmed: true,
@@ -269,7 +269,7 @@ export class GroupsService {
         updatedAt: utcNow(),
       },
     });
-    return this.byId(groupId);
+    return this.byId(group.id);
   }
 
   async mine() {
@@ -315,19 +315,22 @@ export class GroupsService {
       );
     }
     await this.prisma.groupRequest.update({
-      where: { id: groupId },
+      where: { id: group.id },
       data: {
         status: GroupRequestStatus.Cancelled,
         cancelledAt: utcNow(),
         updatedAt: utcNow(),
       },
     });
-    return this.byId(groupId);
+    return this.byId(group.id);
   }
 
-  private async requireGroup(id: string) {
+  private async requireGroup(idOrCode: string) {
     const group = await this.prisma.groupRequest.findFirst({
-      where: { id, isDeleted: false },
+      where: {
+        isDeleted: false,
+        OR: [{ id: idOrCode }, { referenceCode: idOrCode }],
+      },
       include: groupInclude,
     });
     if (!group) {

@@ -11,6 +11,10 @@ import { GroupsService } from '../groups/groups.service';
 import { GroupsController } from '../groups/groups.controller';
 import { DriversService } from '../drivers/drivers.service';
 import { DriversController } from '../drivers/drivers.controller';
+import { CaptainRoutesController } from '../marketplace/captain-routes.controller';
+import { CaptainRoutesService } from '../marketplace/captain-routes.service';
+import { SegmentInventoryService } from '../marketplace/segment-inventory.service';
+import { PushNotificationService } from '../marketplace/push-notification.service';
 import {
   BookingsController,
   SubscriptionPackagesController,
@@ -27,6 +31,7 @@ import {
 } from '../admin/admin-users.controller';
 import {
   AdminBookingsController,
+  AdminCancellationRequestsController,
   AdminLeadsController,
   AdminReviewsController,
   AdminRouteRequestsController,
@@ -56,6 +61,8 @@ import {
   AdminRidesController,
   AdminSupportController,
 } from '../admin/admin-support.controller';
+import { PlacesController } from '../places/places.controller';
+import { PlacesService } from '../places/places.service';
 
 @Module({
   imports: [AuthModule, LandingModule],
@@ -67,17 +74,20 @@ import {
     RidesController,
     GroupsController,
     DriversController,
+    CaptainRoutesController,
     BookingsController,
     TripsController,
     SubscriptionPackagesController,
     SupportController,
     RouteRequestsController,
+    PlacesController,
     AdminUsersController,
     AdminVehiclesController,
     AdminDriversController,
     AdminRoutesController,
     AdminTripsController,
     AdminBookingsController,
+    AdminCancellationRequestsController,
     AdminReviewsController,
     AdminRouteRequestsController,
     AdminLeadsController,
@@ -101,9 +111,13 @@ import {
     RidesService,
     GroupsService,
     DriversService,
+    CaptainRoutesService,
+    SegmentInventoryService,
+    PushNotificationService,
     RouteDemandService,
     CorridorDemandService,
     AdminDashboardService,
+    PlacesService,
   ],
 })
 export class CoreApiModule {}

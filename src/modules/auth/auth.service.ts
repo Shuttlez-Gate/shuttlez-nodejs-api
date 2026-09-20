@@ -67,7 +67,9 @@ export class AuthService {
         where: { phone, isDeleted: false },
       });
       if (!user) {
-        throw new AppException('رقم الهاتف غير مسجل. أنشئ حساباً أولاً');
+        throw new AppException(
+          'رقم جوال غير مسجل بالنظام، يمكنك تسجيل مستخدم جديد',
+        );
       }
       await this.ensureCaptainCanLogin(user, request.client);
     }
@@ -97,7 +99,9 @@ export class AuthService {
       where: { phone, isDeleted: false },
     });
     if (!user) {
-      throw new AppException('رقم الهاتف غير مسجل. أنشئ حساباً أولاً');
+      throw new AppException(
+        'رقم جوال غير مسجل بالنظام، يمكنك تسجيل مستخدم جديد',
+      );
     }
 
     if (purpose === OtpPurpose.Login) {
@@ -412,6 +416,35 @@ export class AuthService {
       data,
     });
     return toProfileDto(updated);
+  }
+
+  async deleteMe() {
+    const userId = this.currentUser.requireUserId();
+    const user = await this.prisma.user.findFirst({
+      where: { id: userId, isDeleted: false },
+    });
+    if (!user) {
+      throw new NotFoundException('المستخدم غير موجود');
+    }
+    const now = utcNow();
+    await this.prisma.$transaction([
+      this.prisma.refreshToken.updateMany({
+        where: { userId, revokedAt: null },
+        data: { revokedAt: now, updatedAt: now },
+      }),
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          isDeleted: true,
+          isActive: false,
+          phone: `del_${user.id.replaceAll('-', '')}`.slice(0, 36),
+          googleProviderId: null,
+          facebookProviderId: null,
+          fcmToken: null,
+          updatedAt: now,
+        },
+      }),
+    ]);
   }
 
   async sendAdminOtp(phoneRaw: string): Promise<SendOtpResponseDto> {

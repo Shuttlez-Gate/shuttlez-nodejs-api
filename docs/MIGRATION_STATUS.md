@@ -17,7 +17,9 @@ Do not mark Complete until tested against the same request/DB behavior as .NET.
 | Customer-trips (410) | Yes | Yes | No | No | Implemented |
 | Subscriptions | Yes | Yes | No | No | Implemented |
 | Trips me/details/cancel | Yes | Yes | No | No | Implemented |
-| Bookings preview/create | Yes | Yes | No | No | Implemented (preview match simplified) |
+| Bookings preview/create | Yes | Yes | No | No | Implemented (preview matches origin/destination for captain routes; empty 200) |
+| FCM push | Yes | Yes | No | No | Implemented (UserDevice + Notification persist; send via firebase-admin) |
+| Captain routes marketplace | Yes | Yes | No | No | Implemented (schema SQL additive; captain APIs; segment lock; admin cancellation) |
 | Rides | Yes | Yes | No | No | Implemented |
 | Groups | Yes | Yes | No | No | Implemented |
 | Drivers / captain lifecycle | Yes | Yes | No | No | Implemented |
@@ -26,7 +28,6 @@ Do not mark Complete until tested against the same request/DB behavior as .NET.
 | Admin fleet/routes/trips/demand/pricing | Yes | Yes | No | No | Implemented (demand launch simplified) |
 | SignalR hubs | Yes | Partial | No | No | Socket.IO on same paths |
 | Google Directions | Yes | Config only | No | No | Haversine fallback |
-| FCM push | Yes | No | No | No | Not Started |
 | File uploads KYC | Yes | Yes | No | No | Implemented (local/tmp disk) |
 
 All **172 HTTP endpoints** from the .NET controllers now have Nest routes. Contract tests against live .NET are still pending.

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Patch, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Patch, Post, Req } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { ApiResponse } from '../../common/api-response';
@@ -94,6 +94,13 @@ export class UsersController {
   async updateMe(@Body() request: UpdateProfileRequest) {
     const profile = await this.auth.updateMe(request);
     return ApiResponse.ok(profile, 'تم تحديث الملف الشخصي');
+  }
+
+  @Delete('me')
+  @ApiOperation({ summary: 'Soft-delete the signed-in rider account' })
+  async deleteMe() {
+    await this.auth.deleteMe();
+    return ApiResponse.ok(undefined, 'تم حذف الحساب');
   }
 }
 

@@ -11,11 +11,13 @@ import { ErrorCodes } from '../../common/error-codes';
 import {
   BookingStatus,
   PaymentStatus,
+  RouteOwnerType,
+  RoutePublishStatus,
   TripStatus,
 } from '../../common/enums';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { baseFields } from '../../common/utils/entity-defaults';
-import { newId, utcNow } from '../../common/utils/date.util';
+import { addDays, newId, utcNow } from '../../common/utils/date.util';
 import {
   calculateTotal,
   money,
@@ -25,6 +27,13 @@ import {
 } from '../../common/utils/money';
 import { bookingStatusLabel, invoiceStatusLabel } from '../../common/utils/enums-map';
 import { FareService } from '../pricing/fare.service';
+import { SegmentInventoryService } from '../marketplace/segment-inventory.service';
+import { PushNotificationService } from '../marketplace/push-notification.service';
+import {
+  matchOriginDestination,
+  remainingForRange,
+  segmentPrice,
+} from '../marketplace/segment-occupancy';
 
 @ApiTags('bookings')
 @Controller('api/v1/bookings')
@@ -33,6 +42,8 @@ export class BookingsController {
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
     private readonly fare: FareService,
+    private readonly segments: SegmentInventoryService,
+    private readonly push: PushNotificationService,
   ) {}
 
   @Get('preview')
@@ -45,57 +56,128 @@ export class BookingsController {
     @Query('destinationAddress') destinationAddress?: string,
   ) {
     const now = utcNow();
-    const until = new Date(now.getTime() + 7 * 86400000);
-    const trips = await this.prisma.trip.findMany({
+    const until = addDays(now, 7);
+    const originLat = optionalCoord(sourceLatitude);
+    const originLng = optionalCoord(sourceLongitude);
+    const destLat = optionalCoord(destinationLatitude);
+    const destLng = optionalCoord(destinationLongitude);
+    const hasCoords =
+      originLat != null && originLng != null && destLat != null && destLng != null;
+
+    const platformTrips = await this.prisma.trip.findMany({
       where: {
         isDeleted: false,
         availableSeats: { gt: 0 },
         status: { in: [TripStatus.Scheduled, TripStatus.DriverAssigned] },
         scheduledAt: { gte: now, lte: until },
+        route: {
+          isDeleted: false,
+          ownerType: RouteOwnerType.Platform,
+        },
       },
       include: { route: { include: { stops: { where: { isDeleted: false } } } } },
       orderBy: { scheduledAt: 'asc' },
       take: 50,
     });
 
-    const days = uniqueDays(trips.map((t) => t.scheduledAt), now);
-    const offersPerDay = days.map((day) =>
-      trips
-        .filter((t) => sameDay(t.scheduledAt, day))
-        .map((t) => ({
-          id: t.id,
+    const captainTrips = hasCoords
+      ? await this.prisma.trip.findMany({
+          where: {
+            isDeleted: false,
+            status: { in: [TripStatus.Scheduled, TripStatus.DriverAssigned] },
+            scheduledAt: { gte: now, lte: until },
+            route: {
+              isDeleted: false,
+              isActive: true,
+              ownerType: RouteOwnerType.Captain,
+              publishStatus: RoutePublishStatus.Published,
+            },
+          },
+          include: {
+            route: {
+              include: {
+                stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
+              },
+            },
+            segmentInventories: { where: { isDeleted: false } },
+          },
+          orderBy: { scheduledAt: 'asc' },
+          take: 80,
+        })
+      : [];
+
+    type PreviewOffer = ReturnType<typeof platformOffer> & {
+      originStopId?: string;
+      destinationStopId?: string;
+      sourceType?: string;
+      scheduledAt: Date;
+    };
+    const offers: PreviewOffer[] = platformTrips.map((t) =>
+      platformOffer(t, sourceAddress, destinationAddress),
+    );
+
+    if (hasCoords) {
+      for (const trip of captainTrips) {
+        const match = matchOriginDestination(
+          trip.route.stops,
+          originLat,
+          originLng,
+          destLat,
+          destLng,
+        );
+        if (!match) {
+          continue;
+        }
+        const remaining = remainingForRange(
+          trip.segmentInventories,
+          match.origin.order,
+          match.destination.order,
+        );
+        if (remaining < 1) {
+          continue;
+        }
+        const firstOrder = trip.route.stops[0]?.order ?? 0;
+        const lastOrder = trip.route.stops[trip.route.stops.length - 1]?.order ?? firstOrder;
+        const price = segmentPrice(
+          money(trip.pricePerSeat),
+          match.origin.order,
+          match.destination.order,
+          firstOrder,
+          lastOrder,
+        );
+        offers.push({
+          id: trip.id,
           pickupWalkLabel: '5 دقائق مشي',
-          pickupAddress: sourceAddress ?? t.route.name,
-          pickupTime: formatHm(t.scheduledAt),
-          dropoffAddress: destinationAddress ?? t.route.description ?? t.route.name,
-          dropoffTime: formatHm(new Date(t.scheduledAt.getTime() + 45 * 60000)),
+          pickupAddress: sourceAddress ?? match.origin.name,
+          pickupTime: formatHm(trip.scheduledAt),
+          dropoffAddress: destinationAddress ?? match.destination.name,
+          dropoffTime: formatHm(new Date(trip.scheduledAt.getTime() + 45 * 60000)),
           dropoffWalkLabel: '5 دقائق مشي',
-          plateLabel: t.referenceCode ?? '',
-          badgeVariant: 'shuttle',
+          plateLabel: trip.referenceCode ?? '',
+          badgeVariant: 'captain',
           crossedPrice: '',
           packageLabel: '',
           packageLabelArgb: 0,
-          seatsLabel: `${t.availableSeats} مقاعد`,
+          seatsLabel: `${remaining} مقاعد`,
           seatsArgb: 0,
           seatsStrikethrough: false,
           cardDimmed: false,
-          pricePerSeat: money(t.pricePerSeat),
-          availableSeats: t.availableSeats,
-        })),
-    );
-
-    if (trips.length === 0) {
-      throw new AppException(
-        'لا توجد تسعيرة متاحة لهذه الرحلة حالياً',
-        400,
-        ErrorCodes.PricingNotAvailable,
-      );
+          pricePerSeat: price,
+          availableSeats: remaining,
+          originStopId: match.origin.id,
+          destinationStopId: match.destination.id,
+          sourceType: 'captain',
+          scheduledAt: trip.scheduledAt,
+        });
+      }
     }
 
-    void sourceLatitude;
-    void sourceLongitude;
-    void destinationLatitude;
-    void destinationLongitude;
+    const days = nextSevenDays(now);
+    const offersPerDay = days.map((day) =>
+      offers
+        .filter((offer) => sameDay(offer.scheduledAt, day))
+        .map(({ scheduledAt: _scheduledAt, ...offer }) => offer),
+    );
 
     return ApiResponse.ok({
       sourceAddress: sourceAddress ?? '',
@@ -112,7 +194,14 @@ export class BookingsController {
   @Post()
   @ApiBearerAuth()
   async create(
-    @Body() body: { tripId: string; seatCount?: number; paymentMethod?: string },
+    @Body()
+    body: {
+      tripId: string;
+      seatCount?: number;
+      paymentMethod?: string;
+      originStopId?: string;
+      destinationStopId?: string;
+    },
   ) {
     const userId = this.currentUser.requireUserId();
     const seatCount = body.seatCount ?? 1;
@@ -122,6 +211,12 @@ export class BookingsController {
     const paymentMethod = requireCash(body.paymentMethod);
     const trip = await this.prisma.trip.findFirst({
       where: { id: body.tripId, isDeleted: false },
+      include: {
+        route: {
+          include: { stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } } },
+        },
+        driver: true,
+      },
     });
     if (!trip) {
       throw new NotFoundException('الرحلة غير موجودة', ErrorCodes.TripNotFound);
@@ -144,20 +239,66 @@ export class BookingsController {
       throw new AppException('لديك حجز على هذه الرحلة بالفعل', 400, ErrorCodes.DuplicateBooking);
     }
 
-    const taken = await this.prisma.tryDecrementTripSeats(trip.id, seatCount);
-    if (taken === 0) {
-      throw new AppException('لا توجد مقاعد كافية', 400, ErrorCodes.SeatUnavailable);
+    const isCaptain = trip.route.ownerType === RouteOwnerType.Captain;
+    const origin = body.originStopId
+      ? trip.route.stops.find((s) => s.id === body.originStopId)
+      : undefined;
+    const destination = body.destinationStopId
+      ? trip.route.stops.find((s) => s.id === body.destinationStopId)
+      : undefined;
+    if (isCaptain) {
+      if (!origin || !destination || destination.order <= origin.order) {
+        throw new AppException(
+          'اختر محطة صعود ونزول صالحتين على المسار',
+          400,
+          ErrorCodes.InvalidStops,
+        );
+      }
     }
 
-    const pricePerSeat = money(trip.pricePerSeat);
+    const firstOrder = trip.route.stops[0]?.order ?? 0;
+    const lastOrder =
+      trip.route.stops[trip.route.stops.length - 1]?.order ?? firstOrder;
+    const pricePerSeat = isCaptain && origin && destination
+      ? segmentPrice(
+          money(trip.pricePerSeat),
+          origin.order,
+          destination.order,
+          firstOrder,
+          lastOrder,
+        )
+      : money(trip.pricePerSeat);
     const totalAmount = calculateTotal(pricePerSeat, seatCount);
     const commissionPercent = await this.fare.platformCommissionPercent(trip.routeId);
     const split = splitEarnings(totalAmount, commissionPercent);
     const bookingId = newId();
     const referenceCode = refCode('BK');
 
-    await this.prisma.$transaction([
-      this.prisma.booking.create({
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${trip.id}))`;
+      if (isCaptain && origin && destination) {
+        await this.segments.tryDecrementRange(
+          tx,
+          trip.id,
+          origin.order,
+          destination.order,
+          seatCount,
+        );
+        await this.segments.syncTripAvailableSeats(tx, trip.id);
+      } else {
+        const taken = await tx.$executeRaw`
+          UPDATE "TripsSet"
+          SET "AvailableSeats" = "AvailableSeats" - ${seatCount},
+              "UpdatedAt" = NOW()
+          WHERE "Id" = ${trip.id}::uuid
+            AND "IsDeleted" = false
+            AND "AvailableSeats" >= ${seatCount}
+            AND "Status" IN (1, 2)`;
+        if (Number(taken) === 0) {
+          throw new AppException('لا توجد مقاعد كافية', 400, ErrorCodes.SeatUnavailable);
+        }
+      }
+      await tx.booking.create({
         data: {
           id: bookingId,
           tripId: trip.id,
@@ -172,10 +313,12 @@ export class BookingsController {
           commissionRate: new Prisma.Decimal(split.commissionRate),
           pricePerSeat: new Prisma.Decimal(pricePerSeat),
           usesSubscriptionCredit: paymentMethod === 'subscription',
+          originStopId: origin?.id ?? null,
+          destinationStopId: destination?.id ?? null,
           ...baseFields(),
         },
-      }),
-      this.prisma.invoice.create({
+      });
+      await tx.invoice.create({
         data: {
           id: newId(),
           bookingId,
@@ -183,9 +326,21 @@ export class BookingsController {
           status: PaymentStatus.Pending,
           ...baseFields(),
         },
-      }),
-    ]);
-    await this.prisma.markTripFullIfNeeded(trip.id);
+      });
+    });
+
+    if (!isCaptain) {
+      await this.prisma.markTripFullIfNeeded(trip.id);
+    }
+    if (trip.driver?.userId) {
+      await this.push.notifyUser(
+        trip.driver.userId,
+        'حجز جديد',
+        `تم تأكيد حجز ${seatCount} مقعد`,
+        'booking_confirmed',
+        { tripId: trip.id, bookingId },
+      );
+    }
 
     return ApiResponse.ok(
       {
@@ -198,6 +353,8 @@ export class BookingsController {
         pricePerSeat,
         seatCount,
         paymentMethod,
+        originStopId: origin?.id ?? null,
+        destinationStopId: destination?.id ?? null,
       },
       'تم تأكيد الحجز — الدفع نقدًا للكابتن',
     );
@@ -210,6 +367,7 @@ export class TripsController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
+    private readonly segments: SegmentInventoryService,
   ) {}
 
   @Get('me')
@@ -270,6 +428,7 @@ export class TripsController {
     const userId = this.currentUser.requireUserId();
     const booking = await this.prisma.booking.findFirst({
       where: { tripId: id, userId, isDeleted: false },
+      include: { originStop: true, destinationStop: true },
     });
     if (!booking) {
       throw new NotFoundException('الحجز غير موجود');
@@ -278,15 +437,27 @@ export class TripsController {
       return ApiResponse.ok(true);
     }
     await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${booking.tripId}))`;
       await tx.booking.update({
         where: { id: booking.id },
         data: { status: BookingStatus.Cancelled, updatedAt: utcNow() },
       });
-      await tx.$executeRaw`
-        UPDATE "TripsSet"
-        SET "AvailableSeats" = "AvailableSeats" + ${booking.seatCount},
-            "UpdatedAt" = NOW()
-        WHERE "Id" = ${booking.tripId}::uuid AND "IsDeleted" = false`;
+      if (booking.originStop && booking.destinationStop) {
+        await this.segments.tryIncrementRange(
+          tx,
+          booking.tripId,
+          booking.originStop.order,
+          booking.destinationStop.order,
+          booking.seatCount,
+        );
+        await this.segments.syncTripAvailableSeats(tx, booking.tripId);
+      } else {
+        await tx.$executeRaw`
+          UPDATE "TripsSet"
+          SET "AvailableSeats" = "AvailableSeats" + ${booking.seatCount},
+              "UpdatedAt" = NOW()
+          WHERE "Id" = ${booking.tripId}::uuid AND "IsDeleted" = false`;
+      }
     });
     return ApiResponse.ok(true, 'تم إلغاء الرحلة بنجاح');
   }
@@ -373,16 +544,51 @@ function sameDay(a: Date, b: Date): boolean {
   );
 }
 
-function uniqueDays(dates: Date[], fallback: Date): Date[] {
-  const map = new Map<string, Date>();
-  for (const d of dates) {
-    const key = d.toISOString().slice(0, 10);
-    if (!map.has(key)) {
-      map.set(key, d);
-    }
+function optionalCoord(raw?: string): number | null {
+  if (raw == null || raw === '') {
+    return null;
   }
-  if (map.size === 0) {
-    map.set(fallback.toISOString().slice(0, 10), fallback);
-  }
-  return [...map.values()];
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+function nextSevenDays(now: Date): Date[] {
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  return Array.from({ length: 7 }, (_, index) => addDays(start, index));
+}
+
+function platformOffer(
+  trip: {
+    id: string;
+    scheduledAt: Date;
+    referenceCode: string | null;
+    availableSeats: number;
+    pricePerSeat: Prisma.Decimal;
+    route: { name: string; description: string | null };
+  },
+  sourceAddress?: string,
+  destinationAddress?: string,
+) {
+  return {
+    id: trip.id,
+    pickupWalkLabel: '5 دقائق مشي',
+    pickupAddress: sourceAddress ?? trip.route.name,
+    pickupTime: formatHm(trip.scheduledAt),
+    dropoffAddress: destinationAddress ?? trip.route.description ?? trip.route.name,
+    dropoffTime: formatHm(new Date(trip.scheduledAt.getTime() + 45 * 60000)),
+    dropoffWalkLabel: '5 دقائق مشي',
+    plateLabel: trip.referenceCode ?? '',
+    badgeVariant: 'shuttle',
+    crossedPrice: '',
+    packageLabel: '',
+    packageLabelArgb: 0,
+    seatsLabel: `${trip.availableSeats} مقاعد`,
+    seatsArgb: 0,
+    seatsStrikethrough: false,
+    cardDimmed: false,
+    pricePerSeat: money(trip.pricePerSeat),
+    availableSeats: trip.availableSeats,
+    sourceType: 'platform',
+    scheduledAt: trip.scheduledAt,
+  };
 }

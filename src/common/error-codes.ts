@@ -62,4 +62,12 @@ export const ErrorCodes = {
   RideLocationInvalid: 'RIDE_LOCATION_INVALID',
   TripDistanceNotCalculated: 'TRIP_DISTANCE_NOT_CALCULATED',
   TripCoordinatesRequired: 'TRIP_COORDINATES_REQUIRED',
+  DriverNotVerified: 'DRIVER_NOT_VERIFIED',
+  RouteNotEditable: 'ROUTE_NOT_EDITABLE',
+  RouteNotPublishable: 'ROUTE_NOT_PUBLISHABLE',
+  InvalidStops: 'INVALID_STOPS',
+  InvalidRecurrence: 'INVALID_RECURRENCE',
+  SegmentUnavailable: 'SEGMENT_UNAVAILABLE',
+  CancellationPending: 'CANCELLATION_PENDING',
+  CancellationNotFound: 'CANCELLATION_NOT_FOUND',
 } as const;

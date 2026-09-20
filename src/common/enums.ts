@@ -93,6 +93,44 @@ export const GroupRequestStatus = {
 export type GroupRequestStatus =
   (typeof GroupRequestStatus)[keyof typeof GroupRequestStatus];
 
+export const RouteOwnerType = {
+  Platform: 0,
+  Captain: 1,
+} as const;
+export type RouteOwnerType =
+  (typeof RouteOwnerType)[keyof typeof RouteOwnerType];
+
+export const RoutePublishStatus = {
+  Draft: 0,
+  Published: 1,
+  Archived: 2,
+} as const;
+export type RoutePublishStatus =
+  (typeof RoutePublishStatus)[keyof typeof RoutePublishStatus];
+
+export const RecurrenceKind = {
+  Once: 0,
+  Weekly: 1,
+  DateRange: 2,
+} as const;
+export type RecurrenceKind =
+  (typeof RecurrenceKind)[keyof typeof RecurrenceKind];
+
+export const CancellationRequestStatus = {
+  Pending: 0,
+  Approved: 1,
+  Rejected: 2,
+} as const;
+export type CancellationRequestStatus =
+  (typeof CancellationRequestStatus)[keyof typeof CancellationRequestStatus];
+
+export const RouteRequestKind = {
+  Request: 'request',
+  Notify: 'notify',
+} as const;
+export type RouteRequestKind =
+  (typeof RouteRequestKind)[keyof typeof RouteRequestKind];
+
 export function userTypeName(value: number): string {
   switch (value) {
     case UserType.Driver:
