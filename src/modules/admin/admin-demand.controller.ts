@@ -32,6 +32,7 @@ export class AdminRouteDemandController {
     @Query('launchStatus') launchStatus?: string,
     @Query('pricingAvailable') pricingAvailable?: string,
     @Query('readyToLaunch') readyToLaunch?: string,
+    @Query('withoutUpcomingTrip') withoutUpcomingTrip?: string,
   ) {
     return ApiResponse.ok(
       await this.demand.list({
@@ -50,6 +51,7 @@ export class AdminRouteDemandController {
         launchStatus,
         pricingAvailable,
         readyToLaunch,
+        withoutUpcomingTrip,
       }),
     );
   }
@@ -69,6 +71,7 @@ export class AdminRouteDemandController {
     @Query('launchStatus') launchStatus?: string,
     @Query('pricingAvailable') pricingAvailable?: string,
     @Query('readyToLaunch') readyToLaunch?: string,
+    @Query('withoutUpcomingTrip') withoutUpcomingTrip?: string,
   ) {
     return ApiResponse.ok(
       await this.demand.export({
@@ -85,6 +88,7 @@ export class AdminRouteDemandController {
         launchStatus,
         pricingAvailable,
         readyToLaunch,
+        withoutUpcomingTrip,
       }),
     );
   }
@@ -97,6 +101,7 @@ export class AdminRouteDemandController {
     @Query('readyToLaunch') readyToLaunch?: string,
     @Query('pricingAvailable') pricingAvailable?: string,
     @Query('search') search?: string,
+    @Query('withoutUpcomingTrip') withoutUpcomingTrip?: string,
   ) {
     return ApiResponse.ok(
       await this.demand.launchPlan({
@@ -106,6 +111,7 @@ export class AdminRouteDemandController {
         readyToLaunch,
         pricingAvailable,
         search,
+        withoutUpcomingTrip,
       }),
     );
   }

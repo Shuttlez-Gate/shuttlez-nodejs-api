@@ -14,12 +14,13 @@ import { Prisma } from '@prisma/client';
 import { ApiResponse } from '../../common/api-response';
 import { AdminOnly } from '../../common/decorators/admin-only.decorator';
 import { PrismaService } from '../../database/prisma/prisma.service';
+import { ConfigService } from '@nestjs/config';
 import { CorridorDemandService } from './corridor-demand.service';
 import { CaptainRoutesService } from '../marketplace/captain-routes.service';
 import { pageRequestFrom, PagedResult } from '../../common/paged-result';
 import { AppException, NotFoundException } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/error-codes';
-import { TripStatus } from '../../common/enums';
+import { TripStatus, BookingStatus } from '../../common/enums';
 import { newId, utcNow } from '../../common/utils/date.util';
 import { baseFields } from '../../common/utils/entity-defaults';
 import { money, refCode } from '../../common/utils/money';
@@ -28,8 +29,30 @@ import {
   invoiceStatusLabel,
   parseBookingStatus,
   parseTripStatus,
+  parseTripStatuses,
   tripStatusLabel,
+  vehicleTypeLabel,
 } from '../../common/utils/enums-map';
+import {
+  CONFIRMED_BOOKING_STATUS,
+  driverAssignedWhere,
+  occupancyPercent,
+  parseOptionalBoolean,
+  summarizeBookingStatusCounts,
+  summarizeConfirmedBookings,
+  tripCapacity,
+  upcomingTripsWhere,
+  isUpcomingTripSnapshot,
+} from './operations-metrics';
+import { enumerateOperationalSchedule, parseAbsoluteInstantRange, parseOperationalDateRange } from '../../common/utils/operational-clock';
+import { resolveApplyDemandPrice, resolveRequiredAvailableSeats } from './apply-demand-price';
+import { canTransitionRouteRequest } from './route-request-workflow';
+import {
+  adminBookingStatusWrite,
+  canAdminCancelTrip,
+  captainAssignmentWrite,
+  captainUnassignmentWrite,
+} from './admin-mutation-contracts';
 
 @ApiTags('admin-routes')
 @AdminOnly()
@@ -86,14 +109,60 @@ export class AdminRoutesController {
   @Get(':id')
   async get(@Param('id') id: string) {
     const route = await this.requireRoute(id);
-    const stops = await this.prisma.stop.findMany({
-      where: { routeId: id, isDeleted: false },
-      orderBy: { order: 'asc' },
-    });
+    const now = new Date();
+    const [stops, tripCount, pricingCount, stats] = await Promise.all([
+      this.prisma.stop.findMany({
+        where: { routeId: id, isDeleted: false },
+        orderBy: { order: 'asc' },
+      }),
+      this.prisma.trip.count({ where: { routeId: id, isDeleted: false } }),
+      this.prisma.pricingRule.count({
+        where: { routeId: id, isDeleted: false, isActive: true },
+      }),
+      this.prisma.$queryRaw<
+        Array<{
+          upcomingTripCount: bigint | number;
+          upcomingUnassignedCount: bigint | number;
+          completedTripCount: bigint | number;
+          confirmedBookingCount: bigint | number;
+          confirmedSeatCount: bigint | number;
+          confirmedRevenue: unknown;
+          remainingSeats: bigint | number;
+        }>
+      >(Prisma.sql`
+        SELECT
+          COALESCE(SUM(CASE
+            WHEN t."Status" IN (${TripStatus.Scheduled}, ${TripStatus.DriverAssigned})
+             AND t."ScheduledAt" >= ${now} THEN 1 ELSE 0 END), 0)::int AS "upcomingTripCount",
+          COALESCE(SUM(CASE
+            WHEN t."Status" = ${TripStatus.Scheduled}
+             AND t."DriverId" IS NULL
+             AND t."ScheduledAt" >= ${now} THEN 1 ELSE 0 END), 0)::int AS "upcomingUnassignedCount",
+          COALESCE(SUM(CASE WHEN t."Status" = ${TripStatus.Completed} THEN 1 ELSE 0 END), 0)::int AS "completedTripCount",
+          COALESCE(SUM(s.confirmed_bookings), 0)::int AS "confirmedBookingCount",
+          COALESCE(SUM(s.confirmed_seats), 0)::int AS "confirmedSeatCount",
+          COALESCE(SUM(s.confirmed_revenue), 0) AS "confirmedRevenue",
+          COALESCE(SUM(t."AvailableSeats"), 0)::int AS "remainingSeats"
+        FROM "TripsSet" t
+        LEFT JOIN LATERAL (
+          SELECT
+            COALESCE(SUM(CASE WHEN b."IsDeleted" = false AND b."Status" = ${BookingStatus.Confirmed} THEN 1 ELSE 0 END), 0)::int AS confirmed_bookings,
+            COALESCE(SUM(CASE WHEN b."IsDeleted" = false AND b."Status" = ${BookingStatus.Confirmed} THEN b."SeatCount" ELSE 0 END), 0)::int AS confirmed_seats,
+            COALESCE(SUM(CASE WHEN b."IsDeleted" = false AND b."Status" = ${BookingStatus.Confirmed} THEN b."TotalAmount" ELSE 0 END), 0) AS confirmed_revenue
+          FROM "BookingsSet" b
+          WHERE b."TripId" = t."Id"
+        ) s ON true
+        WHERE t."RouteId" = ${id}
+          AND t."IsDeleted" = false
+      `),
+    ]);
+    const row = stats[0];
+    const confirmedSeatCount = Number(row?.confirmedSeatCount ?? 0);
+    const remainingSeats = Number(row?.remainingSeats ?? 0);
     return ApiResponse.ok({
       route: mapRoute({
         ...route,
-        _count: { stops: stops.length, trips: 0 },
+        _count: { stops: stops.length, trips: tripCount },
       }),
       stops: stops.map((s) => ({
         id: s.id,
@@ -102,6 +171,18 @@ export class AdminRoutesController {
         longitude: s.longitude,
         order: s.order,
       })),
+      operations: {
+        pricingLinked: pricingCount > 0,
+        activePricingRules: pricingCount,
+        upcomingTripCount: Number(row?.upcomingTripCount ?? 0),
+        upcomingUnassignedCount: Number(row?.upcomingUnassignedCount ?? 0),
+        completedTripCount: Number(row?.completedTripCount ?? 0),
+        confirmedBookingCount: Number(row?.confirmedBookingCount ?? 0),
+        confirmedSeatCount,
+        confirmedRevenue: money(Number(row?.confirmedRevenue ?? 0)),
+        occupancyPercent: occupancyPercent(confirmedSeatCount, remainingSeats),
+        association: 'Trip.routeId',
+      },
     });
   }
 
@@ -213,31 +294,72 @@ export class AdminRoutesController {
 @AdminOnly()
 @Controller('api/v1/admin/trips')
 export class AdminTripsController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly config: ConfigService,
+  ) {}
 
   @Get()
   async list(
     @Query('routeId') routeId?: string,
     @Query('driverId') driverId?: string,
+    @Query('driverAssigned') driverAssigned?: string,
+    @Query('search') search?: string,
     @Query('status') status?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
+    @Query('fromDateTime') fromDateTime?: string,
+    @Query('toDateTime') toDateTime?: string,
+    @Query('upcoming') upcoming?: string,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
     const paging = pageRequestFrom(Number(page), Number(pageSize));
-    const parsedStatus = parseTripStatus(status);
+    const parsedStatuses = parseTripStatuses(status);
+    const assigned = parseOptionalBoolean(driverAssigned);
+    const assignmentFilter = driverId ? { driverId } : driverAssignedWhere(assigned);
+    const scheduledRange =
+      parseAbsoluteInstantRange(fromDateTime, toDateTime) ??
+      parseOperationalDateRange(
+        from,
+        to,
+        this.config.get<string>('OPERATIONAL_TIMEZONE'),
+      );
+    const upcomingOnly = parseOptionalBoolean(upcoming) === true;
+    const upcomingWhere = upcomingOnly ? upcomingTripsWhere(new Date()) : null;
+    let scheduledAtFilter: Prisma.DateTimeFilter | undefined;
+    if (upcomingWhere && scheduledRange) {
+      const rangeGte = scheduledRange.gte ?? upcomingWhere.scheduledAt.gte;
+      scheduledAtFilter = {
+        ...scheduledRange,
+        gte:
+          rangeGte.getTime() > upcomingWhere.scheduledAt.gte.getTime()
+            ? rangeGte
+            : upcomingWhere.scheduledAt.gte,
+      };
+    } else if (upcomingWhere) {
+      scheduledAtFilter = upcomingWhere.scheduledAt;
+    } else if (scheduledRange) {
+      scheduledAtFilter = scheduledRange;
+    }
     const where: Prisma.TripWhereInput = {
       isDeleted: false,
       ...(routeId ? { routeId } : {}),
-      ...(driverId ? { driverId } : {}),
-      ...(parsedStatus != null ? { status: parsedStatus } : {}),
-      ...(from || to
+      ...(assignmentFilter ?? {}),
+      ...(parsedStatuses != null
+        ? parsedStatuses.length === 1
+          ? { status: parsedStatuses[0] }
+          : { status: { in: parsedStatuses } }
+        : upcomingWhere
+          ? { status: upcomingWhere.status }
+          : {}),
+      ...(scheduledAtFilter ? { scheduledAt: scheduledAtFilter } : {}),
+      ...(search
         ? {
-            scheduledAt: {
-              ...(from ? { gte: new Date(from) } : {}),
-              ...(to ? { lte: new Date(to) } : {}),
-            },
+            OR: [
+              { referenceCode: { contains: search } },
+              { route: { name: { contains: search } } },
+            ],
           }
         : {}),
     };
@@ -246,18 +368,26 @@ export class AdminTripsController {
         where,
         skip: paging.skip,
         take: paging.pageSize,
-        orderBy: { scheduledAt: 'desc' },
-        include: {
-          route: true,
-          driver: { include: { user: true } },
-          bookings: { where: { isDeleted: false } },
-        },
+        orderBy: { scheduledAt: upcomingOnly ? 'asc' : 'desc' },
+        include: tripInclude,
       }),
       this.prisma.trip.count({ where }),
     ]);
     return ApiResponse.ok(
       new PagedResult(items.map(mapTrip), paging.page, paging.pageSize, totalCount),
     );
+  }
+
+  @Get(':id')
+  async get(@Param('id') id: string) {
+    const trip = await this.prisma.trip.findFirst({
+      where: { id, isDeleted: false },
+      include: tripDetailsInclude,
+    });
+    if (!trip) {
+      throw new NotFoundException('الرحلة غير موجودة', ErrorCodes.TripNotFound);
+    }
+    return ApiResponse.ok(mapTripDetails(trip));
   }
 
   @Post()
@@ -284,14 +414,11 @@ export class AdminTripsController {
     if (!driver) {
       throw new NotFoundException('الكابتن غير موجود', ErrorCodes.DriverNotFound);
     }
+    const assignment = captainAssignmentWrite(trip.status, driver.id);
     const updated = await this.prisma.trip.update({
       where: { id: trip.id },
       data: {
-        driverId: driver.id,
-        status:
-          trip.status === TripStatus.Scheduled
-            ? TripStatus.DriverAssigned
-            : trip.status,
+        ...assignment,
         updatedAt: utcNow(),
       },
       include: tripInclude,
@@ -302,14 +429,11 @@ export class AdminTripsController {
   @Delete(':tripId/driver')
   async unassign(@Param('tripId') tripId: string) {
     const trip = await this.requireTrip(tripId);
+    const unassignment = captainUnassignmentWrite(trip.status);
     const updated = await this.prisma.trip.update({
       where: { id: trip.id },
       data: {
-        driverId: null,
-        status:
-          trip.status === TripStatus.DriverAssigned
-            ? TripStatus.Scheduled
-            : trip.status,
+        ...unassignment,
         updatedAt: utcNow(),
       },
       include: tripInclude,
@@ -319,7 +443,10 @@ export class AdminTripsController {
 
   @Delete(':id')
   async remove(@Param('id') id: string) {
-    await this.requireTrip(id);
+    const trip = await this.requireTrip(id);
+    if (!canAdminCancelTrip(trip.status)) {
+      throw new AppException('لا يمكن إلغاء رحلة مكتملة أو ملغاة', 400);
+    }
     await this.prisma.trip.update({
       where: { id },
       data: {
@@ -345,18 +472,32 @@ export class AdminTripsController {
       availableSeats: number;
     },
   ) {
-    const start = new Date(body.startDate);
-    const end = new Date(body.endDate);
-    let created = 0;
-    for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
-      if (body.daysOfWeek?.length && !body.daysOfWeek.includes(d.getUTCDay())) {
-        continue;
-      }
-      for (const time of body.times ?? []) {
-        const [hh, mm] = time.split(':').map(Number);
-        const scheduledAt = new Date(d);
-        scheduledAt.setUTCHours(hh || 0, mm || 0, 0, 0);
-        await this.prisma.trip.create({
+    const pricePerSeat = resolveApplyDemandPrice(body.pricePerSeat);
+    if (pricePerSeat == null) {
+      throw new AppException('سعر المقعد مطلوب ويجب أن يكون أكبر من صفر', 400);
+    }
+    const availableSeats = resolveRequiredAvailableSeats(body.availableSeats);
+    if (availableSeats == null) {
+      throw new AppException('عدد المقاعد المتاحة مطلوب ويجب أن يكون 1 على الأقل', 400);
+    }
+    const start = body.startDate?.trim();
+    const end = body.endDate?.trim();
+    if (!start || !end) {
+      throw new AppException('تاريخ البداية والنهاية مطلوبان', 400);
+    }
+    const instants = enumerateOperationalSchedule({
+      startDate: start,
+      endDate: end,
+      times: body.times ?? [],
+      daysOfWeek: body.daysOfWeek,
+      timeZone: this.config.get<string>('OPERATIONAL_TIMEZONE'),
+    });
+    if (instants.length === 0) {
+      return ApiResponse.ok(0, 'تم جدولة الرحلات');
+    }
+    await this.prisma.$transaction(async (tx) => {
+      for (const scheduledAt of instants) {
+        await tx.trip.create({
           data: {
             id: newId(),
             routeId: body.routeId,
@@ -365,19 +506,26 @@ export class AdminTripsController {
               ? TripStatus.DriverAssigned
               : TripStatus.Scheduled,
             scheduledAt,
-            pricePerSeat: new Prisma.Decimal(body.pricePerSeat),
-            availableSeats: body.availableSeats,
+            pricePerSeat: new Prisma.Decimal(pricePerSeat),
+            availableSeats,
             referenceCode: refCode('TR'),
             ...baseFields(),
           },
         });
-        created += 1;
       }
-    }
-    return ApiResponse.ok(created, 'تم جدولة الرحلات');
+    });
+    return ApiResponse.ok(instants.length, 'تم جدولة الرحلات');
   }
 
   private async saveTrip(id: string | null, body: SaveTripBody) {
+    const pricePerSeat = resolveApplyDemandPrice(body.pricePerSeat);
+    if (pricePerSeat == null) {
+      throw new AppException('سعر المقعد مطلوب ويجب أن يكون أكبر من صفر', 400);
+    }
+    const availableSeats = resolveRequiredAvailableSeats(body.availableSeats);
+    if (availableSeats == null) {
+      throw new AppException('عدد المقاعد المتاحة مطلوب ويجب أن يكون 1 على الأقل', 400);
+    }
     const status = parseTripStatus(body.status) ?? TripStatus.Scheduled;
     if (id) {
       await this.requireTrip(id);
@@ -387,8 +535,8 @@ export class AdminTripsController {
           routeId: body.routeId,
           driverId: body.driverId,
           scheduledAt: new Date(body.scheduledAt),
-          pricePerSeat: new Prisma.Decimal(body.pricePerSeat),
-          availableSeats: body.availableSeats,
+          pricePerSeat: new Prisma.Decimal(pricePerSeat),
+          availableSeats,
           status,
           referenceCode: body.referenceCode,
           updatedAt: utcNow(),
@@ -403,8 +551,8 @@ export class AdminTripsController {
         routeId: body.routeId,
         driverId: body.driverId,
         scheduledAt: new Date(body.scheduledAt),
-        pricePerSeat: new Prisma.Decimal(body.pricePerSeat),
-        availableSeats: body.availableSeats,
+        pricePerSeat: new Prisma.Decimal(pricePerSeat),
+        availableSeats,
         status,
         referenceCode: body.referenceCode ?? refCode('TR'),
         ...baseFields(),
@@ -518,7 +666,7 @@ export class AdminBookingsController {
     }
     const updated = await this.prisma.booking.update({
       where: { id },
-      data: { status, updatedAt: utcNow() },
+      data: adminBookingStatusWrite(status, utcNow()),
       include: { user: true, invoice: true, trip: { include: { route: true } } },
     });
     return ApiResponse.ok(
@@ -691,6 +839,12 @@ export class AdminRouteRequestsController {
     });
     if (!item) {
       throw new NotFoundException('الطلب غير موجود');
+    }
+    if (!body?.status) {
+      throw new AppException('الحالة مطلوبة', 400);
+    }
+    if (!canTransitionRouteRequest(item.status, body.status)) {
+      throw new AppException('انتقال حالة غير مسموح', 400);
     }
     const updated = await this.prisma.routeRequest.update({
       where: { id },
@@ -921,13 +1075,71 @@ function mapRoute(r: {
 const tripInclude = {
   route: true,
   driver: { include: { user: true } },
-  bookings: { where: { isDeleted: false } },
+  bookings: {
+    where: { isDeleted: false, status: CONFIRMED_BOOKING_STATUS },
+  },
 } satisfies Prisma.TripInclude;
 
-function mapTrip(
-  t: Prisma.TripGetPayload<{ include: typeof tripInclude }>,
+const tripDetailsInclude = {
+  route: true,
+  driver: { include: { user: true, vehicle: true } },
+  bookings: {
+    where: { isDeleted: false },
+    include: { user: true },
+    orderBy: { createdAt: 'desc' as const },
+  },
+} satisfies Prisma.TripInclude;
+
+function mapTripFinance(
+  bookings: Array<{
+    status: number;
+    seatCount: number;
+    totalAmount: Prisma.Decimal | number;
+    commissionAmount: Prisma.Decimal | number;
+    captainEarnings: Prisma.Decimal | number;
+  }>,
+  availableSeats: number,
 ) {
-  const revenue = t.bookings.reduce((s, b) => s + money(b.totalAmount), 0);
+  const finance = summarizeConfirmedBookings(
+    bookings.map((booking) => ({
+      status: booking.status,
+      seatCount: booking.seatCount,
+      totalAmount: money(booking.totalAmount),
+      commissionAmount: money(booking.commissionAmount),
+      captainEarnings: money(booking.captainEarnings),
+    })),
+  );
+  const capacity = tripCapacity(availableSeats, finance.confirmedSeatCount);
+  return {
+    ...finance,
+    capacity,
+    occupancyPercent: occupancyPercent(finance.confirmedSeatCount, availableSeats),
+  };
+}
+
+function mapTripCore(t: {
+  id: string;
+  routeId: string;
+  route: { name: string };
+  driverId: string | null;
+  driver: { user: { fullName: string | null } } | null;
+  status: number;
+  scheduledAt: Date;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  pricePerSeat: Prisma.Decimal | number;
+  availableSeats: number;
+  referenceCode: string | null;
+  createdAt: Date;
+  bookings: Array<{
+    status: number;
+    seatCount: number;
+    totalAmount: Prisma.Decimal | number;
+    commissionAmount: Prisma.Decimal | number;
+    captainEarnings: Prisma.Decimal | number;
+  }>;
+}) {
+  const finance = mapTripFinance(t.bookings, t.availableSeats);
   return {
     id: t.id,
     routeId: t.routeId,
@@ -941,9 +1153,92 @@ function mapTrip(
     pricePerSeat: money(t.pricePerSeat),
     availableSeats: t.availableSeats,
     referenceCode: t.referenceCode,
-    bookingCount: t.bookings.length,
-    revenue,
+    bookingCount: finance.confirmedBookingCount,
+    /** Confirmed shuttle revenue: SUM(TotalAmount) for BookingStatus.Confirmed only. */
+    revenue: finance.confirmedRevenue,
+    confirmedBookingCount: finance.confirmedBookingCount,
+    confirmedSeatCount: finance.confirmedSeatCount,
+    confirmedCommission: finance.confirmedCommission,
+    confirmedCaptainEarnings: finance.confirmedCaptainEarnings,
+    capacity: finance.capacity,
+    occupancyPercent: finance.occupancyPercent,
     createdAt: t.createdAt,
+    isUpcoming: isUpcomingTripSnapshot(t.status, t.scheduledAt, new Date()),
+  };
+}
+
+function mapTrip(t: Prisma.TripGetPayload<{ include: typeof tripInclude }>) {
+  return mapTripCore(t);
+}
+
+function mapTripVehicle(
+  driver: Prisma.TripGetPayload<{ include: typeof tripDetailsInclude }>['driver'],
+) {
+  if (driver?.vehicle) {
+    return {
+      id: driver.vehicle.id,
+      type: vehicleTypeLabel(driver.vehicle.type),
+      capacity: driver.vehicle.capacity,
+      plateNumber: driver.vehicle.plateNumber,
+      model: driver.vehicle.model,
+    };
+  }
+  if (driver?.plateNumber || driver?.vehicleKind || driver?.seats) {
+    return {
+      id: driver.vehicleId ?? null,
+      type: driver.vehicleKind ?? null,
+      capacity: driver.seats ?? null,
+      plateNumber: driver.plateNumber ?? null,
+      model: driver.vehicleModelName ?? null,
+    };
+  }
+  return null;
+}
+
+function mapTripDetails(
+  t: Prisma.TripGetPayload<{ include: typeof tripDetailsInclude }>,
+) {
+  const list = mapTripCore(t);
+  const arrivalAt =
+    t.route.durationSeconds != null
+      ? new Date(t.scheduledAt.getTime() + t.route.durationSeconds * 1000)
+      : null;
+  return {
+    ...list,
+    date: t.scheduledAt,
+    departureTime: t.scheduledAt,
+    arrivalAt,
+    bookedSeats: list.confirmedSeatCount,
+    driver: t.driver
+      ? {
+          id: t.driver.id,
+          name: t.driver.user.fullName,
+          phone: t.driver.user.phone,
+          assigned: true,
+          isOnline: t.driver.isOnline,
+        }
+      : {
+          id: null,
+          name: null,
+          phone: null,
+          assigned: false,
+          isOnline: null,
+        },
+    vehicle: mapTripVehicle(t.driver),
+    bookingSummary: summarizeBookingStatusCounts(t.bookings),
+    bookings: t.bookings.map((booking) => ({
+      id: booking.id,
+      reference: booking.referenceCode,
+      userId: booking.userId,
+      userName: booking.user.fullName,
+      userPhone: booking.user.phone,
+      seats: booking.seatCount,
+      status: bookingStatusLabel(booking.status),
+      totalAmount: money(booking.totalAmount),
+      commissionAmount: money(booking.commissionAmount),
+      captainAmount: money(booking.captainEarnings),
+      bookingDate: booking.createdAt,
+    })),
   };
 }
 

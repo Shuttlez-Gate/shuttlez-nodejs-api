@@ -13,6 +13,7 @@ import { baseFields } from '../../../common/utils/entity-defaults';
 import { money, normalizeMoney, refCode } from '../../../common/utils/money';
 import { tripStatusLabel, vehicleTypeLabel } from '../../../common/utils/enums-map';
 import { pageRequestFrom, PagedResult } from '../../../common/paged-result';
+import { isConfirmedDemandPassenger } from './demand-confirmation';
 import {
   buildDisplayLabel,
   buildRouteKey,
@@ -29,6 +30,9 @@ import {
   type DemandLaunchStatus,
   type ReadinessResult,
 } from './readiness';
+import { indexUpcomingTripsByRoute, upcomingTripsWhere } from '../operations-metrics';
+import { summarizeLaunchPipeline } from '../management-metrics';
+import { isLaunchEligibleCorridor } from '../ready-without-trip';
 
 const ALLOWED_STATUSES = [
   'new_demand',
@@ -63,6 +67,7 @@ export interface DemandQuery {
   launchStatus?: string;
   pricingAvailable?: string;
   readyToLaunch?: string;
+  withoutUpcomingTrip?: string;
   routeKey?: string;
 }
 
@@ -110,6 +115,11 @@ interface DemandGroup {
   firstRequestAt: Date;
   lastRequestAt: Date;
   readiness: Record<string, unknown> | null;
+  hasUpcomingTrip: boolean;
+  upcomingTripId: string | null;
+  upcomingTripScheduledAt: Date | null;
+  upcomingTripCount: number;
+  upcomingUnassignedCount: number;
 }
 
 @Injectable({ scope: Scope.REQUEST })
@@ -132,10 +142,54 @@ export class RouteDemandService {
     };
   }
 
+  async countReadyRoutesWithoutUpcomingTrip(now = new Date()): Promise<number> {
+    const snapshot = await this.launchPipelineSnapshot(now);
+    return snapshot.readyCorridorsWithoutUpcomingTrip;
+  }
+
+  async launchPipelineSnapshot(now = new Date()) {
+    const groups = await this.buildGroups();
+    await this.attachReadiness(groups);
+    const corridors = groups.map((g) => {
+      const r = (g.readiness ?? {}) as {
+        launchStatus?: string;
+        pricingLinked?: boolean;
+        pricingAvailable?: boolean;
+        routeId?: string | null;
+      };
+      return {
+        launchStatus: r.launchStatus,
+        pricingLinked: r.pricingLinked,
+        pricingAvailable: r.pricingAvailable,
+        routeId: r.routeId,
+      };
+    });
+    const readyIds = [
+      ...new Set(
+        corridors.filter(isLaunchEligibleCorridor).map((row) => row.routeId as string),
+      ),
+    ];
+    const upcoming = readyIds.length
+      ? await this.prisma.trip.findMany({
+          where: {
+            ...upcomingTripsWhere(now),
+            routeId: { in: readyIds },
+          },
+          select: { routeId: true },
+          distinct: ['routeId'],
+        })
+      : [];
+    return summarizeLaunchPipeline(
+      corridors,
+      upcoming.map((trip) => trip.routeId),
+    );
+  }
+
   async list(query: DemandQuery) {
     const paging = pageRequestFrom(Number(query.page), Number(query.pageSize));
     const groups = await this.buildGroups();
     await this.attachReadiness(groups);
+    await this.attachUpcomingTrips(groups);
     const filtered = this.applyFilters(groups, query);
     const slice = filtered.slice(paging.skip, paging.skip + paging.pageSize);
     return new PagedResult(
@@ -149,6 +203,7 @@ export class RouteDemandService {
   async export(query: DemandQuery) {
     const groups = await this.buildGroups();
     await this.attachReadiness(groups);
+    await this.attachUpcomingTrips(groups);
     return this.applyFilters(groups, query).map((g, index) => {
       const preferredTime = mode(
         g.passengers.map((p) => p.preferredDepartureTime).filter((t): t is string => !!t),
@@ -180,6 +235,7 @@ export class RouteDemandService {
       throw new NotFoundException('مجموعة الطلب غير موجودة', ErrorCodes.RouteDemandNotFound);
     }
     await this.attachReadiness([group]);
+    await this.attachUpcomingTrips([group]);
     return this.toDetails(group);
   }
 
@@ -215,7 +271,8 @@ export class RouteDemandService {
   async launchPlan(query: DemandQuery) {
     const groups = await this.buildGroups();
     await this.attachReadiness(groups);
-    const preFilter = { ...query, launchStatus: undefined, readyToLaunch: undefined };
+    await this.attachUpcomingTrips(groups);
+    const preFilter = { ...query, launchStatus: undefined, readyToLaunch: undefined, withoutUpcomingTrip: undefined };
     let plans = this.applyFilters(groups, preFilter)
       .filter((g) => g.readiness)
       .map((g) => this.toLaunchPlan(g));
@@ -235,6 +292,9 @@ export class RouteDemandService {
       plans = plans.filter(
         (p) => p.launchStatus === 'READY_TO_LAUNCH' || p.launchStatus === 'FULL',
       );
+    }
+    if (query.withoutUpcomingTrip === 'true') {
+      plans = plans.filter((p) => !p.hasUpcomingTrip);
     }
 
     plans.sort((a, b) => {
@@ -446,6 +506,7 @@ export class RouteDemandService {
       throw new NotFoundException('مجموعة الطلب غير موجودة', ErrorCodes.RouteDemandNotFound);
     }
     await this.attachReadiness([group]);
+    await this.attachUpcomingTrips([group]);
     return this.toRow(group, 0);
   }
 
@@ -547,6 +608,11 @@ export class RouteDemandService {
         firstRequestAt: minDate(samples.map((s) => s.createdAt)),
         lastRequestAt: maxDate(samples.map((s) => s.createdAt)),
         readiness: null,
+        hasUpcomingTrip: false,
+        upcomingTripId: null,
+        upcomingTripScheduledAt: null,
+        upcomingTripCount: 0,
+        upcomingUnassignedCount: 0,
       });
     }
 
@@ -582,7 +648,7 @@ export class RouteDemandService {
         preferredReturnTime: l.toTime,
         days: l.usageDays,
         leadStatus: 'lead',
-        isConfirmed: false,
+        isConfirmed: isConfirmedDemandPassenger('landing'),
         createdAt: l.createdAt,
         routeKey: buildRouteKey(normalizeLocation(from), normalizeLocation(to)),
       };
@@ -605,7 +671,7 @@ export class RouteDemandService {
         days: notes.usageDays,
         preferredVehicleType: r.preferredVehicleType,
         leadStatus: r.status,
-        isConfirmed: r.status === 'approved' || r.status === 'converted',
+        isConfirmed: isConfirmedDemandPassenger('app', r.status),
         createdAt: r.createdAt,
         routeKey: buildRouteKey(normalizeLocation(from), normalizeLocation(to)),
       };
@@ -781,6 +847,37 @@ export class RouteDemandService {
     };
   }
 
+  private async attachUpcomingTrips(groups: DemandGroup[], now = new Date()) {
+    const routeIds = [
+      ...new Set(
+        groups
+          .map((g) => (g.readiness as { routeId?: string | null } | null)?.routeId)
+          .filter((id): id is string => !!id),
+      ),
+    ];
+    const byRoute = routeIds.length
+      ? indexUpcomingTripsByRoute(
+          await this.prisma.trip.findMany({
+            where: {
+              ...upcomingTripsWhere(now),
+              routeId: { in: routeIds },
+            },
+            select: { id: true, routeId: true, scheduledAt: true, driverId: true },
+            orderBy: { scheduledAt: 'asc' },
+          }),
+        )
+      : new Map();
+    for (const group of groups) {
+      const routeId = (group.readiness as { routeId?: string | null } | null)?.routeId;
+      const upcoming = routeId ? byRoute.get(routeId) : undefined;
+      group.hasUpcomingTrip = !!upcoming;
+      group.upcomingTripId = upcoming?.id ?? null;
+      group.upcomingTripScheduledAt = upcoming?.scheduledAt ?? null;
+      group.upcomingTripCount = upcoming?.count ?? 0;
+      group.upcomingUnassignedCount = upcoming?.unassignedCount ?? 0;
+    }
+  }
+
   private applyFilters(groups: DemandGroup[], query: DemandQuery): DemandGroup[] {
     let result = groups;
     const category = query.routeCategory?.trim().toLowerCase();
@@ -863,6 +960,9 @@ export class RouteDemandService {
           String((g.readiness as { launchStatus?: string }).launchStatus).toUpperCase() === 'READY',
       );
     }
+    if (query.withoutUpcomingTrip === 'true') {
+      result = result.filter((g) => !g.hasUpcomingTrip);
+    }
     return result;
   }
 
@@ -888,6 +988,11 @@ export class RouteDemandService {
       assignedDriverId: group.assignedDriverId,
       assignedDriverName: group.assignedDriverName,
       readiness: group.readiness,
+      hasUpcomingTrip: group.hasUpcomingTrip,
+      upcomingTripId: group.upcomingTripId,
+      upcomingTripScheduledAt: group.upcomingTripScheduledAt,
+      upcomingTripCount: group.upcomingTripCount,
+      upcomingUnassignedCount: group.upcomingUnassignedCount,
     };
   }
 
@@ -987,6 +1092,7 @@ export class RouteDemandService {
       weeklyPrice: r.weeklyPrice ?? null,
       monthlyPrice: r.monthlyPrice ?? null,
       launchStatus: planningStatus,
+      calculatorLaunchStatus: apiStatus,
       reasonCode,
       readinessReason: reason,
       minimumLaunchRiders: r.minimumLaunchRiders ?? null,
@@ -1003,6 +1109,11 @@ export class RouteDemandService {
       commissionRate: r.commissionRate ?? null,
       commissionType: r.commissionType ?? null,
       isEstimate,
+      hasUpcomingTrip: group.hasUpcomingTrip,
+      upcomingTripId: group.upcomingTripId,
+      upcomingTripScheduledAt: group.upcomingTripScheduledAt,
+      upcomingTripCount: group.upcomingTripCount,
+      upcomingUnassignedCount: group.upcomingUnassignedCount,
     };
   }
 

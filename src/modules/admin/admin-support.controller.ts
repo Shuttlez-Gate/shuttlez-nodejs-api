@@ -25,6 +25,11 @@ import { GroupRequestStatus, RideRequestStatus } from '../../common/enums';
 import { RidesService } from '../rides/rides.service';
 import { GroupsService } from '../groups/groups.service';
 import { AdminDashboardService } from './dashboard.service';
+import {
+  groupsNeedingCaptainWhere,
+  parseOptionalBoolean,
+  ridesNeedingCaptainWhere,
+} from './operations-metrics';
 
 @ApiTags('admin-support')
 @AdminOnly()
@@ -289,16 +294,19 @@ export class AdminRidesController {
     @Query('status') status?: string,
     @Query('driverId') driverId?: string,
     @Query('riderUserId') riderUserId?: string,
+    @Query('unassigned') unassigned?: string,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
     const paging = pageRequestFrom(Number(page), Number(pageSize));
     const parsed = parseRideStatus(status);
+    const needsCaptain = parseOptionalBoolean(unassigned) === true;
     const where: Prisma.RideRequestWhereInput = {
       isDeleted: false,
       ...(parsed != null ? { status: parsed } : {}),
       ...(driverId ? { driverId } : {}),
       ...(riderUserId ? { riderUserId } : {}),
+      ...(needsCaptain ? ridesNeedingCaptainWhere() : {}),
     };
     const [items, totalCount] = await this.prisma.$transaction([
       this.prisma.rideRequest.findMany({
@@ -386,16 +394,19 @@ export class AdminGroupsController {
     @Query('status') status?: string,
     @Query('driverId') driverId?: string,
     @Query('organizerUserId') organizerUserId?: string,
+    @Query('unassigned') unassigned?: string,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
     const paging = pageRequestFrom(Number(page), Number(pageSize));
     const parsed = parseGroupStatus(status);
+    const needsCaptain = parseOptionalBoolean(unassigned) === true;
     const where: Prisma.GroupRequestWhereInput = {
       isDeleted: false,
       ...(parsed != null ? { status: parsed } : {}),
       ...(driverId ? { driverId } : {}),
       ...(organizerUserId ? { organizerUserId } : {}),
+      ...(needsCaptain ? groupsNeedingCaptainWhere() : {}),
     };
     const [items, totalCount] = await this.prisma.$transaction([
       this.prisma.groupRequest.findMany({

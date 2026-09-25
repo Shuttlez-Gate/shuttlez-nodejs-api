@@ -7,6 +7,7 @@ import { TripStatus, VehicleType } from '../../common/enums';
 import { newId, utcNow } from '../../common/utils/date.util';
 import { baseFields } from '../../common/utils/entity-defaults';
 import { haversineKm, refCode } from '../../common/utils/money';
+import { resolveApplyDemandPrice } from './apply-demand-price';
 
 const CORRIDOR_METERS = 100;
 const MATCHABLE = ['pending', 'approved'];
@@ -167,7 +168,13 @@ export class CorridorDemandService {
     if (scheduledAt.getTime() <= Date.now()) {
       scheduledAt = new Date(Date.now() + 3 * 3_600_000);
     }
-    const price = body?.pricePerSeat && body.pricePerSeat > 0 ? body.pricePerSeat : 100;
+    const price = resolveApplyDemandPrice(body?.pricePerSeat);
+    if (price == null) {
+      throw new AppException(
+        'حدد سعراً للمقعد قبل تشغيل التوزيع. لا يوجد سعر افتراضي.',
+        400,
+      );
+    }
     const now = utcNow();
 
     const tripIds: string[] = [];

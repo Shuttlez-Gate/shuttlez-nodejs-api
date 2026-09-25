@@ -7,6 +7,8 @@ let nestReady: Promise<void> | null = null;
 
 function ensureNest(): Promise<void> {
   if (!nestReady) {
+    process.env.OPERATIONAL_TIMEZONE =
+      process.env.OPERATIONAL_TIMEZONE || 'Africa/Cairo';
     nestReady = createNestApp(server).then(async (app) => {
       await app.init();
     });

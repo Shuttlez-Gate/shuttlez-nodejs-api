@@ -11,6 +11,7 @@ import { existsSync, mkdirSync } from 'fs';
 import type { Express } from 'express';
 import { AppModule } from './app.module';
 import { driverTripsRateLimit } from './common/middleware/driver-trips-rate-limit';
+import { resolveOperationalTimeZone } from './common/utils/operational-clock';
 
 const logger = new Logger('CreateApp');
 
@@ -68,6 +69,9 @@ function isLocalDevOrigin(origin: string): boolean {
 export async function createNestApp(
   expressInstance?: Express,
 ): Promise<NestExpressApplication> {
+  if (!process.env.OPERATIONAL_TIMEZONE?.trim()) {
+    process.env.OPERATIONAL_TIMEZONE = 'Africa/Cairo';
+  }
   const app = expressInstance
     ? await NestFactory.create<NestExpressApplication>(
         AppModule,
@@ -76,6 +80,7 @@ export async function createNestApp(
     : await NestFactory.create<NestExpressApplication>(AppModule);
 
   const config = app.get(ConfigService);
+  logOperationalTimeZone(config);
 
   const envOrigins = (config.get<string>('CORS_ALLOWED_ORIGINS') ?? '')
     .split(',')
@@ -133,4 +138,16 @@ export async function createNestApp(
   SwaggerModule.setup('swagger', app, document);
 
   return app;
+}
+
+function logOperationalTimeZone(config: ConfigService): void {
+  const raw = config.get<string>('OPERATIONAL_TIMEZONE')?.trim();
+  const resolved = resolveOperationalTimeZone(raw);
+  if (raw && raw !== resolved) {
+    logger.warn(
+      `OPERATIONAL_TIMEZONE is invalid; using ${resolved}`,
+    );
+    return;
+  }
+  logger.log(`Operational timezone: ${resolved}`);
 }

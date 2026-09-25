@@ -76,6 +76,21 @@ export function parseTripStatus(raw?: string | null): number | undefined {
   return map[key.replace(/[\s_-]/g, '')];
 }
 
+export function parseTripStatuses(raw?: string | null): number[] | undefined {
+  if (!raw?.trim()) {
+    return undefined;
+  }
+  const values = [
+    ...new Set(
+      raw
+        .split(/[,+]/)
+        .map((part) => parseTripStatus(part))
+        .filter((value): value is number => value != null),
+    ),
+  ];
+  return values.length ? values : undefined;
+}
+
 export function tripStatusLabel(value: number): string {
   switch (value) {
     case TripStatus.DriverAssigned:

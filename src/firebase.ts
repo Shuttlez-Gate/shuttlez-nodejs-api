@@ -19,6 +19,8 @@ function ensureNest(): Promise<void> {
     process.env.NODE_ENV = 'production';
     process.env.FIREBASE_PROJECT_ID =
       process.env.FIREBASE_PROJECT_ID || 'shuttlez-api';
+    process.env.OPERATIONAL_TIMEZONE =
+      process.env.OPERATIONAL_TIMEZONE || 'Africa/Cairo';
     nestReady = createNestApp(server).then(async (app) => {
       await app.init();
     });
