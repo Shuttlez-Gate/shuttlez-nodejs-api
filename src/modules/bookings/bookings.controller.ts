@@ -57,6 +57,7 @@ export class BookingsController {
   ) {
     const now = utcNow();
     const until = addDays(now, 7);
+
     const originLat = optionalCoord(sourceLatitude);
     const originLng = optionalCoord(sourceLongitude);
     const destLat = optionalCoord(destinationLatitude);
@@ -147,12 +148,19 @@ export class BookingsController {
         );
         offers.push({
           id: trip.id,
-          pickupWalkLabel: '5 دقائق مشي',
+          pickupWalkLabel: '',
           pickupAddress: sourceAddress ?? match.origin.name,
           pickupTime: formatHm(trip.scheduledAt),
           dropoffAddress: destinationAddress ?? match.destination.name,
-          dropoffTime: formatHm(new Date(trip.scheduledAt.getTime() + 45 * 60000)),
-          dropoffWalkLabel: '5 دقائق مشي',
+          dropoffTime:
+            trip.route.durationSeconds && trip.route.durationSeconds > 0
+              ? formatHm(
+                  new Date(
+                    trip.scheduledAt.getTime() + trip.route.durationSeconds * 1000,
+                  ),
+                )
+              : '',
+          dropoffWalkLabel: '',
           plateLabel: trip.referenceCode ?? '',
           badgeVariant: 'captain',
           crossedPrice: '',
@@ -179,13 +187,14 @@ export class BookingsController {
         .map(({ scheduledAt: _scheduledAt, ...offer }) => offer),
     );
 
+    const firstWithOffers = offersPerDay.findIndex((day) => day.length > 0);
     return ApiResponse.ok({
       sourceAddress: sourceAddress ?? '',
       destinationAddress: destinationAddress ?? '',
       dateChips: days.map((d, i) => ({
         dayName: d.toLocaleDateString('ar-EG', { weekday: 'short' }),
-        shortDate: d.toLocaleDateString('en-GB', { day: 'numeric', month: 'numeric' }),
-        isSelected: i === 0,
+        shortDate: d.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' }),
+        isSelected: i === (firstWithOffers >= 0 ? firstWithOffers : 0),
       })),
       offersPerDay,
     });
@@ -410,16 +419,79 @@ export class TripsController {
     const userId = this.currentUser.requireUserId();
     const booking = await this.prisma.booking.findFirst({
       where: { tripId: id, userId, isDeleted: false },
-      include: { invoice: true, trip: true },
+      include: { invoice: true, trip: true, user: true },
     });
     if (!booking?.invoice) {
-      throw new NotFoundException('الفاتورة غير موجودة');
+      const ride = await this.prisma.rideRequest.findFirst({
+        where: { id, riderUserId: userId, isDeleted: false },
+        include: { rider: true },
+      });
+      if (!ride) {
+        throw new NotFoundException('الفاتورة غير موجودة');
+      }
+      const amount = money(ride.totalAmount);
+      const seatFare = money(ride.fareAmount);
+      const when = ride.scheduledFor ?? ride.createdAt;
+      const reference = ride.referenceCode?.trim() || ride.id.slice(0, 8);
+      return ApiResponse.ok({
+        bookingId: ride.id,
+        amount,
+        status: 'cash',
+        paidAt: null,
+        tripId: reference.startsWith('#') ? reference : `#${reference}`,
+        dateTimeLabel: `${when.toLocaleDateString('ar-EG', { weekday: 'long' })} ${formatDate(when)} - ${formatHm(when)} - نقدا`,
+        passengerName: ride.rider.fullName?.trim() || '',
+        lineItems: [
+          {
+            title: 'المبلغ الاجمالي',
+            value: formatMoney(amount),
+            isTotal: true,
+            highlight: false,
+          },
+          ...(seatFare > 0
+            ? [
+                {
+                  title: 'رسوم الرحلة الأساسية',
+                  value: formatMoney(seatFare),
+                  isTotal: false,
+                  highlight: false,
+                },
+              ]
+            : []),
+        ],
+      });
     }
+    const amount = money(booking.invoice.amount);
+    const seatFare = money(booking.pricePerSeat) * booking.seatCount;
+    const lineItems = [
+      {
+        title: 'المبلغ الاجمالي',
+        value: formatMoney(amount),
+        isTotal: true,
+        highlight: false,
+      },
+      ...(seatFare > 0
+        ? [
+            {
+              title: 'رسوم الرحلة الأساسية',
+              value: formatMoney(seatFare),
+              isTotal: false,
+              highlight: false,
+            },
+          ]
+        : []),
+    ];
+    const when = booking.trip.scheduledAt;
+    const reference = booking.referenceCode?.trim() || booking.id.slice(0, 8);
     return ApiResponse.ok({
       bookingId: booking.id,
-      amount: money(booking.invoice.amount),
+      amount,
       status: invoiceStatusLabel(booking.invoice.status),
       paidAt: booking.invoice.paidAt,
+      tripId: reference.startsWith('#') ? reference : `#${reference}`,
+      dateTimeLabel: `${when.toLocaleDateString('ar-EG', { weekday: 'long' })} ${formatDate(when)} - ${formatHm(when)} - نقدا`,
+      passengerName: booking.user.fullName?.trim() || '',
+      lineItems,
     });
   }
 
@@ -536,6 +608,16 @@ function formatHm(date: Date): string {
   return date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 }
 
+function formatDate(date: Date): string {
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  return `${day}/${month}/${date.getUTCFullYear()}`;
+}
+
+function formatMoney(value: number): string {
+  return value.toFixed(2);
+}
+
 function sameDay(a: Date, b: Date): boolean {
   return (
     a.getUTCFullYear() === b.getUTCFullYear() &&
@@ -564,19 +646,25 @@ function platformOffer(
     referenceCode: string | null;
     availableSeats: number;
     pricePerSeat: Prisma.Decimal;
-    route: { name: string; description: string | null };
+    route: { name: string; description: string | null; durationSeconds: number | null };
   },
   sourceAddress?: string,
   destinationAddress?: string,
 ) {
+  const durationMs =
+    trip.route.durationSeconds && trip.route.durationSeconds > 0
+      ? trip.route.durationSeconds * 1000
+      : 0;
   return {
     id: trip.id,
-    pickupWalkLabel: '5 دقائق مشي',
+    pickupWalkLabel: '',
     pickupAddress: sourceAddress ?? trip.route.name,
     pickupTime: formatHm(trip.scheduledAt),
     dropoffAddress: destinationAddress ?? trip.route.description ?? trip.route.name,
-    dropoffTime: formatHm(new Date(trip.scheduledAt.getTime() + 45 * 60000)),
-    dropoffWalkLabel: '5 دقائق مشي',
+    dropoffTime: durationMs
+      ? formatHm(new Date(trip.scheduledAt.getTime() + durationMs))
+      : '',
+    dropoffWalkLabel: '',
     plateLabel: trip.referenceCode ?? '',
     badgeVariant: 'shuttle',
     crossedPrice: '',

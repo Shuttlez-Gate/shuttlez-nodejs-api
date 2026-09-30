@@ -46,6 +46,7 @@ const DEFAULT_ORIGINS = [
   'http://127.0.0.1:4300',
   'https://127.0.0.1:4300',
   'https://shuttlez-dashboard.web.app',
+  'https://admin.shuttlez.org',
   'https://shuttlez-dashboard.firebaseapp.com',
   'https://shuttlez-landing.web.app',
   'https://shuttlez-landing.firebaseapp.com',

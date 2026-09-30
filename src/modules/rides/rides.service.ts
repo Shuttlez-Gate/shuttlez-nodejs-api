@@ -99,6 +99,7 @@ export class RidesService {
     fromZoneKey?: string;
     toZoneKey?: string;
     paymentMethod?: string;
+    scheduledFor?: string;
   }) {
     const userId = this.currentUser.requireUserId();
     const paymentMethod = requireCash(body.paymentMethod);
@@ -113,6 +114,7 @@ export class RidesService {
     const fareAmount = this.fare.rideFare(rule, distanceKm);
     const split = splitEarnings(fareAmount, platformPercent);
     const perKm = money(rule.pricePerKm) > 0;
+    const scheduledFor = parseScheduledFor(body.scheduledFor);
     const ride = await this.prisma.rideRequest.create({
       include: rideInclude,
       data: {
@@ -140,6 +142,7 @@ export class RidesService {
         baseFareApplied: perKm ? rule.baseFare : null,
         pricePerKmApplied: perKm ? rule.pricePerKm : null,
         minimumFareApplied: perKm ? rule.minimumFare : null,
+        scheduledFor,
         ...baseFields(),
       },
     });
@@ -240,6 +243,7 @@ export class RidesService {
       startedAt: ride.startedAt,
       completedAt: ride.completedAt,
       cancelledAt: ride.cancelledAt,
+      scheduledFor: ride.scheduledFor,
       referenceCode: ride.referenceCode,
       createdAt: ride.createdAt,
       driverPhotoUrl: user?.avatarUrl ?? null,
@@ -271,4 +275,11 @@ type RideRow = Prisma.RideRequestGetPayload<{ include: typeof rideInclude }>;
 function trimOrNull(value?: string | null): string | null {
   const v = value?.trim();
   return v ? v : null;
+}
+
+function parseScheduledFor(value?: string | null): Date | null {
+  const raw = value?.trim();
+  if (!raw) return null;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date;
 }

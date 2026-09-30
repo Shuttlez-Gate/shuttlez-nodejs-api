@@ -48,6 +48,7 @@ export class RidesController {
       fromZoneKey?: string;
       toZoneKey?: string;
       paymentMethod?: string;
+      scheduledFor?: string;
     },
   ) {
     const ride = await this.rides.create(body);

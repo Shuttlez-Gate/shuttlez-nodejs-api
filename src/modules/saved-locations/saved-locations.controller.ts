@@ -128,6 +128,7 @@ function mapLocation(entity: {
   longitude: number;
   isFavorite: boolean;
   createdAt: Date;
+  updatedAt?: Date | null;
 }) {
   return {
     id: entity.id,
@@ -137,5 +138,6 @@ function mapLocation(entity: {
     longitude: entity.longitude,
     isFavorite: entity.isFavorite,
     createdAt: entity.createdAt,
+    updatedAt: entity.updatedAt,
   };
 }
