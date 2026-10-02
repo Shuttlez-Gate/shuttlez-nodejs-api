@@ -7,5 +7,6 @@ import {
 
 @Module({
   providers: [TripTrackingGateway, SupportChatGateway, DriverGateway],
+  exports: [SupportChatGateway],
 })
 export class RealtimeModule {}

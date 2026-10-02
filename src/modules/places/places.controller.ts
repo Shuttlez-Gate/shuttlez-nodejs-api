@@ -34,4 +34,33 @@ export class PlacesController {
     const loc = await this.places.details(placeId ?? '');
     return ApiResponse.ok(loc);
   }
+
+  /** Road route for the rider map. The browser cannot call Google Directions (CORS). */
+  @Get('directions')
+  async directions(
+    @Query('originLat') originLatRaw?: string,
+    @Query('originLng') originLngRaw?: string,
+    @Query('destLat') destLatRaw?: string,
+    @Query('destLng') destLngRaw?: string,
+  ) {
+    const originLat = Number(originLatRaw);
+    const originLng = Number(originLngRaw);
+    const destLat = Number(destLatRaw);
+    const destLng = Number(destLngRaw);
+    if (
+      !Number.isFinite(originLat) ||
+      !Number.isFinite(originLng) ||
+      !Number.isFinite(destLat) ||
+      !Number.isFinite(destLng)
+    ) {
+      return ApiResponse.ok([]);
+    }
+    const route = await this.places.drivingRoute({
+      originLat,
+      originLng,
+      destLat,
+      destLng,
+    });
+    return ApiResponse.ok(route);
+  }
 }

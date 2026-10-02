@@ -7,6 +7,7 @@ import { PrismaService } from '../../database/prisma/prisma.service';
 import { baseFields } from '../../common/utils/entity-defaults';
 import { newId, utcNow } from '../../common/utils/date.util';
 import { LandingService } from '../landing/landing.service';
+import { SupportChatGateway } from '../realtime/realtime.gateway';
 
 @ApiTags('support')
 @ApiBearerAuth()
@@ -15,6 +16,7 @@ export class SupportController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
+    private readonly supportChat: SupportChatGateway,
   ) {}
 
   @Get('tickets')
@@ -32,19 +34,31 @@ export class SupportController {
   }
 
   @Post('tickets')
-  async create(@Body() body: { subject: string; tripId?: string }) {
+  async create(
+    @Body()
+    body: { subject?: string; tripId?: string; initialMessage?: string },
+  ) {
     const userId = this.currentUser.requireUserId();
+    const subject = (body.subject ?? body.initialMessage ?? 'بلاغ عن رحلة').trim();
+    if (!subject) {
+      throw new AppException('عنوان البلاغ مطلوب', 400);
+    }
+    const tripId = await this.existingTripId(body.tripId);
     const ticket = await this.prisma.supportTicket.create({
       data: {
         id: newId(),
         userId,
-        subject: body.subject,
-        tripId: body.tripId,
+        subject,
+        ...(tripId ? { tripId } : {}),
         status: 'open',
         ...baseFields(),
       },
     });
-    return ApiResponse.ok({ id: ticket.id, status: ticket.status });
+    return ApiResponse.ok({
+      id: ticket.id,
+      ticketId: ticket.id,
+      status: ticket.status,
+    });
   }
 
   @Get('tickets/:id/messages')
@@ -79,7 +93,24 @@ export class SupportController {
       where: { id: ticket.id },
       data: { updatedAt: utcNow() },
     });
+    this.supportChat.publish({
+      id: message.id,
+      ticketId: message.ticketId,
+      isFromSupport: message.isFromSupport,
+      content: message.content,
+      createdAt: message.createdAt.toISOString(),
+    });
     return ApiResponse.ok(message);
+  }
+
+  private async existingTripId(raw?: string) {
+    const tripId = raw?.trim();
+    if (!tripId) return undefined;
+    const trip = await this.prisma.trip.findFirst({
+      where: { id: tripId, isDeleted: false },
+      select: { id: true },
+    });
+    return trip?.id;
   }
 
   private async ownedTicket(id: string, userId: string) {

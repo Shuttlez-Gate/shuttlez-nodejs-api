@@ -63,9 +63,10 @@ import {
 } from '../admin/admin-support.controller';
 import { PlacesController } from '../places/places.controller';
 import { PlacesService } from '../places/places.service';
+import { RealtimeModule } from '../realtime/realtime.module';
 
 @Module({
-  imports: [AuthModule, LandingModule],
+  imports: [AuthModule, LandingModule, RealtimeModule],
   controllers: [
     SavedLocationsController,
     NotificationsController,

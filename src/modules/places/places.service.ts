@@ -115,4 +115,109 @@ export class PlacesService {
     if (typeof lat !== 'number' || typeof lng !== 'number') return null;
     return { lat, lng };
   }
+
+  async drivingRoute(input: {
+    originLat: number;
+    originLng: number;
+    destLat: number;
+    destLng: number;
+  }): Promise<{
+    points: Array<{ latitude: number; longitude: number }>;
+    durationSeconds: number;
+    distanceMeters: number;
+  }> {
+    const params = new URLSearchParams({
+      origin: `${input.originLat},${input.originLng}`,
+      destination: `${input.destLat},${input.destLng}`,
+      mode: 'driving',
+      key: this.apiKey(),
+    });
+    const res = await fetch(
+      `https://maps.googleapis.com/maps/api/directions/json?${params}`,
+    );
+    const data = (await res.json()) as {
+      status?: string;
+      error_message?: string;
+      routes?: Array<{
+        overview_polyline?: { points?: string };
+        legs?: Array<{
+          duration?: { value?: number };
+          distance?: { value?: number };
+          steps?: Array<{ polyline?: { points?: string } }>;
+        }>;
+      }>;
+    };
+    const status = data.status ?? '';
+    if (status === 'ZERO_RESULTS') {
+      return { points: [], durationSeconds: 0, distanceMeters: 0 };
+    }
+    if (status && status !== 'OK') {
+      throw new ServiceUnavailableException(
+        data.error_message || `Directions failed (${status})`,
+      );
+    }
+    const route = data.routes?.[0];
+    const detailed = decodeRouteSteps(route?.legs);
+    const points =
+      detailed.length >= 2
+        ? detailed
+        : decodePolyline(route?.overview_polyline?.points ?? '');
+    const durationSeconds = (route?.legs ?? []).reduce(
+      (sum, leg) => sum + (leg.duration?.value ?? 0),
+      0,
+    );
+    const distanceMeters = (route?.legs ?? []).reduce(
+      (sum, leg) => sum + (leg.distance?.value ?? 0),
+      0,
+    );
+    return { points, durationSeconds, distanceMeters };
+  }
+}
+
+function decodeRouteSteps(
+  legs?: Array<{ steps?: Array<{ polyline?: { points?: string } }> }>,
+): Array<{ latitude: number; longitude: number }> {
+  const points: Array<{ latitude: number; longitude: number }> = [];
+  for (const leg of legs ?? []) {
+    for (const step of leg.steps ?? []) {
+      const decoded = decodePolyline(step.polyline?.points ?? '');
+      if (decoded.length === 0) continue;
+      if (points.length > 0) points.push(...decoded.slice(1));
+      else points.push(...decoded);
+    }
+  }
+  return points;
+}
+
+function decodePolyline(
+  encoded: string,
+): Array<{ latitude: number; longitude: number }> {
+  const points: Array<{ latitude: number; longitude: number }> = [];
+  if (!encoded) return points;
+  let index = 0;
+  let lat = 0;
+  let lng = 0;
+  while (index < encoded.length) {
+    let shift = 0;
+    let result = 0;
+    let byte = 0;
+    do {
+      byte = encoded.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+    lat += result & 1 ? ~(result >> 1) : result >> 1;
+
+    shift = 0;
+    result = 0;
+    do {
+      byte = encoded.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+    lng += result & 1 ? ~(result >> 1) : result >> 1;
+
+    points.push({ latitude: lat / 1e5, longitude: lng / 1e5 });
+  }
+  return points;
 }

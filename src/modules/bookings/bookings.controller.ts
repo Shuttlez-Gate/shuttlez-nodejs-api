@@ -113,9 +113,48 @@ export class BookingsController {
       sourceType?: string;
       scheduledAt: Date;
     };
-    const offers: PreviewOffer[] = platformTrips.map((t) =>
-      platformOffer(t, sourceAddress, destinationAddress),
-    );
+    const offers: PreviewOffer[] = [];
+    for (const trip of platformTrips) {
+      const stops = trip.route.stops ?? [];
+      if (hasCoords) {
+        const match = matchOriginDestination(
+          stops,
+          originLat,
+          originLng,
+          destLat,
+          destLng,
+        );
+        if (!match) {
+          continue;
+        }
+        const firstOrder = stops[0]?.order ?? 0;
+        const lastOrder = stops[stops.length - 1]?.order ?? firstOrder;
+        offers.push({
+          ...platformOffer(trip, match.origin.name, match.destination.name),
+          pricePerSeat: segmentPrice(
+            money(trip.pricePerSeat),
+            match.origin.order,
+            match.destination.order,
+            firstOrder,
+            lastOrder,
+          ),
+          originStopId: match.origin.id,
+          destinationStopId: match.destination.id,
+        });
+        continue;
+      }
+      const first = stops[0];
+      const last = stops[stops.length - 1];
+      offers.push({
+        ...platformOffer(
+          trip,
+          first?.name ?? sourceAddress,
+          last && last.id !== first?.id ? last.name : destinationAddress,
+        ),
+        originStopId: first?.id,
+        destinationStopId: last && last.id !== first?.id ? last.id : undefined,
+      });
+    }
 
     if (hasCoords) {
       for (const trip of captainTrips) {
@@ -247,6 +286,13 @@ export class BookingsController {
     if (existing) {
       throw new AppException('لديك حجز على هذه الرحلة بالفعل', 400, ErrorCodes.DuplicateBooking);
     }
+    if (await this.hasOverlappingBooking(userId, trip.id, trip.scheduledAt, trip.route.durationSeconds)) {
+      throw new AppException(
+        'لديك رحلة محجوزة في هذا الوقت',
+        409,
+        ErrorCodes.TripTimeConflict,
+      );
+    }
 
     const isCaptain = trip.route.ownerType === RouteOwnerType.Captain;
     const origin = body.originStopId
@@ -368,6 +414,45 @@ export class BookingsController {
       'تم تأكيد الحجز — الدفع نقدًا للكابتن',
     );
   }
+
+  private async hasOverlappingBooking(
+    userId: string,
+    tripId: string,
+    scheduledAt: Date,
+    durationSeconds: number | null,
+  ) {
+    const start = scheduledAt.getTime();
+    const end = start + (durationSeconds && durationSeconds > 0 ? durationSeconds : 3600) * 1000;
+    const others = await this.prisma.booking.findMany({
+      where: {
+        userId,
+        isDeleted: false,
+        tripId: { not: tripId },
+        status: { in: [BookingStatus.Pending, BookingStatus.Confirmed] },
+        trip: {
+          isDeleted: false,
+          status: {
+            in: [TripStatus.Scheduled, TripStatus.DriverAssigned, TripStatus.InProgress],
+          },
+        },
+      },
+      select: {
+        trip: {
+          select: {
+            scheduledAt: true,
+            route: { select: { durationSeconds: true } },
+          },
+        },
+      },
+    });
+    return others.some((booking) => {
+      const otherStart = booking.trip.scheduledAt.getTime();
+      const otherDuration = booking.trip.route.durationSeconds;
+      const otherEnd =
+        otherStart + (otherDuration && otherDuration > 0 ? otherDuration : 3600) * 1000;
+      return start < otherEnd && otherStart < end;
+    });
+  }
 }
 
 @ApiTags('trips')
@@ -384,7 +469,11 @@ export class TripsController {
     const userId = this.currentUser.requireUserId();
     const bookings = await this.prisma.booking.findMany({
       where: { userId, isDeleted: false },
-      include: { trip: { include: { route: true } } },
+      include: {
+        originStop: true,
+        destinationStop: true,
+        trip: { include: { route: true } },
+      },
       orderBy: { createdAt: 'desc' },
     });
     const upcomingStatuses = [
@@ -406,7 +495,15 @@ export class TripsController {
   async details(@Param('id') id: string) {
     const trip = await this.prisma.trip.findFirst({
       where: { id, isDeleted: false },
-      include: { route: { include: { stops: { where: { isDeleted: false } } } }, bookings: true },
+      include: {
+        route: { include: { stops: { where: { isDeleted: false } } } },
+        bookings: { include: { originStop: true, destinationStop: true } },
+        driver: {
+          include: {
+            user: { select: { fullName: true, avatarUrl: true } },
+          },
+        },
+      },
     });
     if (!trip) {
       throw new NotFoundException('الرحلة غير موجودة');
@@ -441,46 +538,24 @@ export class TripsController {
         tripId: reference.startsWith('#') ? reference : `#${reference}`,
         dateTimeLabel: `${when.toLocaleDateString('ar-EG', { weekday: 'long' })} ${formatDate(when)} - ${formatHm(when)} - نقدا`,
         passengerName: ride.rider.fullName?.trim() || '',
-        lineItems: [
-          {
-            title: 'المبلغ الاجمالي',
-            value: formatMoney(amount),
-            isTotal: true,
-            highlight: false,
-          },
-          ...(seatFare > 0
-            ? [
-                {
-                  title: 'رسوم الرحلة الأساسية',
-                  value: formatMoney(seatFare),
-                  isTotal: false,
-                  highlight: false,
-                },
-              ]
-            : []),
-        ],
+        lineItems: buildInvoiceLines({
+          total: amount,
+          baseFare: money(ride.baseFareApplied ?? 0),
+          distanceKm: money(ride.distanceKm ?? 0),
+          pricePerKm: money(ride.pricePerKmApplied ?? 0),
+          fareAmount: seatFare,
+        }),
       });
     }
     const amount = money(booking.invoice.amount);
     const seatFare = money(booking.pricePerSeat) * booking.seatCount;
-    const lineItems = [
-      {
-        title: 'المبلغ الاجمالي',
-        value: formatMoney(amount),
-        isTotal: true,
-        highlight: false,
-      },
-      ...(seatFare > 0
-        ? [
-            {
-              title: 'رسوم الرحلة الأساسية',
-              value: formatMoney(seatFare),
-              isTotal: false,
-              highlight: false,
-            },
-          ]
-        : []),
-    ];
+    const lineItems = buildInvoiceLines({
+      total: amount,
+      baseFare: 0,
+      distanceKm: 0,
+      pricePerKm: 0,
+      fareAmount: seatFare,
+    });
     const when = booking.trip.scheduledAt;
     const reference = booking.referenceCode?.trim() || booking.id.slice(0, 8);
     return ApiResponse.ok({
@@ -616,6 +691,49 @@ function formatDate(date: Date): string {
 
 function formatMoney(value: number): string {
   return value.toFixed(2);
+}
+
+function buildInvoiceLines(input: {
+  total: number;
+  baseFare: number;
+  distanceKm: number;
+  pricePerKm: number;
+  fareAmount: number;
+}) {
+  const lines: Array<{
+    title: string;
+    value: string;
+    isTotal: boolean;
+    highlight: boolean;
+  }> = [];
+  if (input.total > 0) {
+    lines.push({
+      title: 'المبلغ الاجمالي',
+      value: formatMoney(input.total),
+      isTotal: true,
+      highlight: false,
+    });
+  }
+  const base = input.baseFare > 0 ? input.baseFare : input.fareAmount;
+  if (base > 0) {
+    lines.push({
+      title: 'رسوم الرحلة الأساسية',
+      value: formatMoney(base),
+      isTotal: false,
+      highlight: false,
+    });
+  }
+  if (input.distanceKm > 0 && input.pricePerKm > 0) {
+    lines.push({
+      title: 'تكلفة المسافة',
+      value: formatMoney(
+        Math.round(input.distanceKm * input.pricePerKm * 100) / 100,
+      ),
+      isTotal: false,
+      highlight: false,
+    });
+  }
+  return lines;
 }
 
 function sameDay(a: Date, b: Date): boolean {

@@ -6,6 +6,7 @@ export const ErrorCodes = {
   PricingNotAvailable: 'PRICING_NOT_AVAILABLE',
   TripNotBookable: 'TRIP_NOT_BOOKABLE',
   DuplicateBooking: 'DUPLICATE_BOOKING',
+  TripTimeConflict: 'TRIP_TIME_CONFLICT',
   TripPriceImmutable: 'TRIP_PRICE_IMMUTABLE',
   RouteDemandNotFound: 'ROUTE_DEMAND_NOT_FOUND',
   RouteNotFound: 'ROUTE_NOT_FOUND',

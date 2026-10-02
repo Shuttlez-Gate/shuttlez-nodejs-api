@@ -190,39 +190,25 @@ export class AdminRoutesController {
   async create(@Body() body: SaveRouteBody) {
     const route = await this.prisma.route.create({
       data: { id: newId(), ...routeData(body), ...baseFields() },
-      include: { _count: { select: { stops: true, trips: true } } },
     });
-    return ApiResponse.ok(
-      { route: mapRoute(route), stops: [] },
-      'تم إنشاء الخط',
-    );
+    const stops = normalizeStopWrites(body);
+    if (stops.length) {
+      await this.replaceRouteStops(route.id, stops);
+    }
+    return this.get(route.id);
   }
 
   @Put(':id')
   async update(@Param('id') id: string, @Body() body: SaveRouteBody) {
     await this.requireRoute(id);
-    const route = await this.prisma.route.update({
+    await this.prisma.route.update({
       where: { id },
       data: { ...routeData(body), updatedAt: utcNow() },
-      include: { _count: { select: { stops: true, trips: true } } },
     });
-    const stops = await this.prisma.stop.findMany({
-      where: { routeId: id, isDeleted: false },
-      orderBy: { order: 'asc' },
-    });
-    return ApiResponse.ok(
-      {
-        route: mapRoute(route),
-        stops: stops.map((s) => ({
-          id: s.id,
-          name: s.name,
-          latitude: s.latitude,
-          longitude: s.longitude,
-          order: s.order,
-        })),
-      },
-      'تم تحديث الخط',
-    );
+    if (hasStopsField(body)) {
+      await this.replaceRouteStops(id, normalizeStopWrites(body));
+    }
+    return this.get(id);
   }
 
   @Delete(':id')
@@ -236,30 +222,12 @@ export class AdminRoutesController {
   }
 
   @Put(':id/stops')
-  async replaceStops(
-    @Param('id') id: string,
-    @Body() stops: { name: string; latitude: number; longitude: number; order: number }[],
-  ) {
+  async replaceStops(@Param('id') id: string, @Body() body: unknown) {
     await this.requireRoute(id);
-    await this.prisma.$transaction(async (tx) => {
-      await tx.stop.updateMany({
-        where: { routeId: id, isDeleted: false },
-        data: { isDeleted: true, updatedAt: utcNow() },
-      });
-      if (stops?.length) {
-        await tx.stop.createMany({
-          data: stops.map((s) => ({
-            id: newId(),
-            routeId: id,
-            name: s.name,
-            latitude: s.latitude,
-            longitude: s.longitude,
-            order: s.order,
-            ...baseFields(),
-          })),
-        });
-      }
-    });
+    if (!Array.isArray(body) && !hasStopsField(body)) {
+      return this.get(id);
+    }
+    await this.replaceRouteStops(id, normalizeStopWrites(body));
     return this.get(id);
   }
 
@@ -287,6 +255,33 @@ export class AdminRoutesController {
       throw new NotFoundException('الخط غير موجود', ErrorCodes.RouteNotFound);
     }
     return route;
+  }
+
+  private async replaceRouteStops(id: string, stops: StopWrite[]) {
+    try {
+      await this.prisma.stop.updateMany({
+        where: { routeId: id, isDeleted: false },
+        data: { isDeleted: true, updatedAt: utcNow() },
+      });
+      if (!stops.length) return;
+      await this.prisma.stop.createMany({
+        data: stops.map((s) => ({
+          id: newId(),
+          routeId: id,
+          name: s.name,
+          latitude: s.latitude,
+          longitude: s.longitude,
+          order: s.order,
+          ...baseFields(),
+        })),
+      });
+    } catch {
+      throw new AppException(
+        'تعذر حفظ المحطات. أعد المحاولة',
+        400,
+        ErrorCodes.InvalidStops,
+      );
+    }
   }
 }
 
@@ -995,6 +990,13 @@ export class AdminLeadsController {
   }
 }
 
+type StopWrite = {
+  name: string;
+  latitude: number;
+  longitude: number;
+  order: number;
+};
+
 type SaveRouteBody = {
   name: string;
   description?: string;
@@ -1006,7 +1008,46 @@ type SaveRouteBody = {
   distanceMeters?: number;
   durationSeconds?: number;
   isActive?: boolean;
+  stops?: unknown;
+  Stops?: unknown;
 };
+
+function hasStopsField(body: unknown): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const record = body as Record<string, unknown>;
+  return Object.prototype.hasOwnProperty.call(record, 'stops')
+    || Object.prototype.hasOwnProperty.call(record, 'Stops');
+}
+
+function normalizeStopWrites(body: unknown): StopWrite[] {
+  const record =
+    body && typeof body === 'object' && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : null;
+  const raw = Array.isArray(body)
+    ? body
+    : Array.isArray(record?.stops)
+      ? record.stops
+      : Array.isArray(record?.Stops)
+        ? record.Stops
+        : [];
+
+  return raw
+    .map((item, index) => {
+      const s = (item ?? {}) as Record<string, unknown>;
+      const latitude = Number(s.latitude ?? s.Latitude);
+      const longitude = Number(s.longitude ?? s.Longitude);
+      const parsedOrder = Number(s.order ?? s.Order ?? index + 1);
+      const name = String(s.name ?? s.Name ?? `محطة ${index + 1}`).trim();
+      return {
+        name: name || `محطة ${index + 1}`,
+        latitude,
+        longitude,
+        order: Number.isFinite(parsedOrder) ? parsedOrder : index + 1,
+      };
+    })
+    .filter((s) => Number.isFinite(s.latitude) && Number.isFinite(s.longitude));
+}
 
 type SaveTripBody = {
   routeId: string;

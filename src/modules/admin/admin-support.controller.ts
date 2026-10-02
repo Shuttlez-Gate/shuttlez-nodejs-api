@@ -24,6 +24,7 @@ import { parseGroupStatus, parseRideStatus } from '../../common/utils/enums-map'
 import { GroupRequestStatus, RideRequestStatus } from '../../common/enums';
 import { RidesService } from '../rides/rides.service';
 import { GroupsService } from '../groups/groups.service';
+import { SupportChatGateway } from '../realtime/realtime.gateway';
 import { AdminDashboardService } from './dashboard.service';
 import {
   groupsNeedingCaptainWhere,
@@ -38,6 +39,7 @@ export class AdminSupportController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
+    private readonly supportChat: SupportChatGateway,
   ) {}
 
   @Get('tickets')
@@ -141,6 +143,13 @@ export class AdminSupportController {
     await this.prisma.supportTicket.update({
       where: { id },
       data: { updatedAt: utcNow(), status: ticket.status === 'closed' ? ticket.status : 'open' },
+    });
+    this.supportChat.publish({
+      id: message.id,
+      ticketId: message.ticketId,
+      isFromSupport: true,
+      content: message.content,
+      createdAt: message.createdAt.toISOString(),
     });
     return ApiResponse.ok(
       {
