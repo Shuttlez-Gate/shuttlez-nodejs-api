@@ -54,6 +54,7 @@ export class BookingsController {
     @Query('destinationLongitude') destinationLongitude?: string,
     @Query('sourceAddress') sourceAddress?: string,
     @Query('destinationAddress') destinationAddress?: string,
+    @Query('vehicleTypeIndex') vehicleTypeIndex?: string,
   ) {
     const now = utcNow();
     const until = addDays(now, 7);
@@ -100,6 +101,7 @@ export class BookingsController {
                 stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
               },
             },
+            driver: true,
             segmentInventories: { where: { isDeleted: false } },
           },
           orderBy: { scheduledAt: 'asc' },
@@ -112,6 +114,7 @@ export class BookingsController {
       destinationStopId?: string;
       sourceType?: string;
       scheduledAt: Date;
+      vehicleBucket: 'carshuttle' | 'minibus' | 'bus';
     };
     const offers: PreviewOffer[] = [];
     for (const trip of platformTrips) {
@@ -140,6 +143,11 @@ export class BookingsController {
           ),
           originStopId: match.origin.id,
           destinationStopId: match.destination.id,
+          vehicleBucket: classifyVehicle(
+            trip.route.vehicleKind,
+            trip.route.capacity,
+            trip.availableSeats,
+          ),
         });
         continue;
       }
@@ -153,6 +161,11 @@ export class BookingsController {
         ),
         originStopId: first?.id,
         destinationStopId: last && last.id !== first?.id ? last.id : undefined,
+        vehicleBucket: classifyVehicle(
+          trip.route.vehicleKind,
+          trip.route.capacity,
+          trip.availableSeats,
+        ),
       });
     }
 
@@ -191,14 +204,12 @@ export class BookingsController {
           pickupAddress: sourceAddress ?? match.origin.name,
           pickupTime: formatHm(trip.scheduledAt),
           dropoffAddress: destinationAddress ?? match.destination.name,
-          dropoffTime:
-            trip.route.durationSeconds && trip.route.durationSeconds > 0
-              ? formatHm(
-                  new Date(
-                    trip.scheduledAt.getTime() + trip.route.durationSeconds * 1000,
-                  ),
-                )
-              : '',
+          dropoffTime: formatHm(
+            new Date(
+              trip.scheduledAt.getTime() +
+                resolveDurationSeconds(trip.route.durationSeconds) * 1000,
+            ),
+          ),
           dropoffWalkLabel: '',
           plateLabel: trip.referenceCode ?? '',
           badgeVariant: 'captain',
@@ -213,17 +224,30 @@ export class BookingsController {
           availableSeats: remaining,
           originStopId: match.origin.id,
           destinationStopId: match.destination.id,
+          vehicleBucket: classifyVehicle(
+            trip.route.vehicleKind ?? trip.driver?.vehicleKind,
+            trip.route.capacity ?? trip.driver?.seats,
+            remaining,
+          ),
           sourceType: 'captain',
           scheduledAt: trip.scheduledAt,
         });
       }
     }
 
-    const days = nextSevenDays(now);
+    const requestedVehicle = previewVehicleBucket(vehicleTypeIndex);
+    const matchedOffers = requestedVehicle
+      ? offers.filter((offer) => offer.vehicleBucket === requestedVehicle)
+      : offers;
+    // Calendar days from Cairo "today" forward (never past local days).
+    const days = nextSevenCairoDays(now);
     const offersPerDay = days.map((day) =>
-      offers
-        .filter((offer) => sameDay(offer.scheduledAt, day))
-        .map(({ scheduledAt: _scheduledAt, ...offer }) => offer),
+      matchedOffers
+        .filter((offer) => sameCairoDay(offer.scheduledAt, day))
+        .map(({ scheduledAt: _scheduledAt, vehicleBucket, ...offer }) => ({
+          ...offer,
+          vehicleKind: vehicleBucket,
+        })),
     );
 
     const firstWithOffers = offersPerDay.findIndex((day) => day.length > 0);
@@ -231,8 +255,8 @@ export class BookingsController {
       sourceAddress: sourceAddress ?? '',
       destinationAddress: destinationAddress ?? '',
       dateChips: days.map((d, i) => ({
-        dayName: d.toLocaleDateString('ar-EG', { weekday: 'short' }),
-        shortDate: d.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' }),
+        dayName: weekdayNameAr(d),
+        shortDate: ddMmUtc(d),
         isSelected: i === (firstWithOffers >= 0 ? firstWithOffers : 0),
       })),
       offersPerDay,
@@ -249,6 +273,7 @@ export class BookingsController {
       paymentMethod?: string;
       originStopId?: string;
       destinationStopId?: string;
+      vehicleKind?: string;
     },
   ) {
     const userId = this.currentUser.requireUserId();
@@ -370,6 +395,7 @@ export class BookingsController {
           usesSubscriptionCredit: paymentMethod === 'subscription',
           originStopId: origin?.id ?? null,
           destinationStopId: destination?.id ?? null,
+          vehicleKind: body.vehicleKind?.trim().slice(0, 40) || null,
           ...baseFields(),
         },
       });
@@ -472,19 +498,84 @@ export class TripsController {
       include: {
         originStop: true,
         destinationStop: true,
-        trip: { include: { route: true } },
+        trip: { include: { route: true, driver: true } },
       },
       orderBy: { createdAt: 'desc' },
     });
-    const upcomingStatuses = [
+    const upcomingStatuses = new Set([
       TripStatus.Scheduled,
       TripStatus.DriverAssigned,
       TripStatus.InProgress,
-    ];
+    ]);
+    // JSON-safe DTOs (Prisma Decimal / null trip must not break history).
+    const mapped = bookings
+      .filter((b) => b.trip != null)
+      .map((b) => ({
+        id: b.id,
+        tripId: b.tripId,
+        status: b.status,
+        seatCount: b.seatCount,
+        referenceCode: b.referenceCode,
+        vehicleKind: b.vehicleKind,
+        totalAmount: money(b.totalAmount),
+        createdAt: b.createdAt,
+        originStop: b.originStop
+          ? {
+              id: b.originStop.id,
+              name: b.originStop.name,
+              latitude: b.originStop.latitude,
+              longitude: b.originStop.longitude,
+              order: b.originStop.order,
+            }
+          : null,
+        destinationStop: b.destinationStop
+          ? {
+              id: b.destinationStop.id,
+              name: b.destinationStop.name,
+              latitude: b.destinationStop.latitude,
+              longitude: b.destinationStop.longitude,
+              order: b.destinationStop.order,
+            }
+          : null,
+        trip: {
+          id: b.trip.id,
+          status: b.trip.status,
+          scheduledAt: b.trip.scheduledAt,
+          referenceCode: b.trip.referenceCode,
+          availableSeats: b.trip.availableSeats,
+          pricePerSeat: money(b.trip.pricePerSeat),
+          route: b.trip.route
+            ? {
+                id: b.trip.route.id,
+                name: b.trip.route.name,
+                description: b.trip.route.description,
+                capacity: b.trip.route.capacity,
+                vehicleKind: b.trip.route.vehicleKind,
+                startLatitude: b.trip.route.startLatitude,
+                startLongitude: b.trip.route.startLongitude,
+                endLatitude: b.trip.route.endLatitude,
+                endLongitude: b.trip.route.endLongitude,
+                durationSeconds: b.trip.route.durationSeconds,
+              }
+            : null,
+          driver: b.trip.driver
+            ? {
+                id: b.trip.driver.id,
+                vehicleKind: b.trip.driver.vehicleKind,
+                seats: b.trip.driver.seats,
+              }
+            : null,
+        },
+      }));
     return ApiResponse.ok({
-      upcoming: bookings.filter((b) => upcomingStatuses.includes(b.trip.status as 1 | 2 | 3)),
-      past: bookings.filter(
+      upcoming: mapped.filter(
         (b) =>
+          b.status !== BookingStatus.Cancelled &&
+          upcomingStatuses.has(b.trip.status as 1 | 2 | 3),
+      ),
+      past: mapped.filter(
+        (b) =>
+          b.status === BookingStatus.Cancelled ||
           b.trip.status === TripStatus.Completed ||
           b.trip.status === TripStatus.Cancelled,
       ),
@@ -736,12 +827,106 @@ function buildInvoiceLines(input: {
   return lines;
 }
 
-function sameDay(a: Date, b: Date): boolean {
-  return (
-    a.getUTCFullYear() === b.getUTCFullYear() &&
-    a.getUTCMonth() === b.getUTCMonth() &&
-    a.getUTCDate() === b.getUTCDate()
-  );
+function previewVehicleBucket(
+  raw?: string,
+): 'carshuttle' | 'minibus' | 'bus' | null {
+  const value = raw?.trim().toLowerCase();
+  if (value === '0' || value === 'car' || value === 'carshuttle') return 'carshuttle';
+  if (value === '1' || value === 'minibus' || value === 'mini') return 'minibus';
+  if (value === '2' || value === 'bus') return 'bus';
+  return null;
+}
+
+function classifyVehicle(
+  kind?: string | null,
+  capacity?: number | null,
+  seatsHint?: number | null,
+): 'carshuttle' | 'minibus' | 'bus' {
+  // Priority:
+  // 1) Route.Capacity / Driver.Seats
+  // 2) Route.VehicleKind / Driver.VehicleKind text
+  // 3) available/remaining seats hint
+  // Buckets: car 1-4, minibus 5-14, bus 15+.
+  const seats =
+    capacity != null && capacity > 0
+      ? capacity
+      : seatsHint != null && seatsHint > 0
+        ? seatsHint
+        : null;
+
+  const text = (kind ?? '').trim().toLowerCase();
+  if (
+    text.includes('mini') ||
+    text.includes('ميني') ||
+    text.includes('micro') ||
+    text.includes('فان')
+  ) {
+    return 'minibus';
+  }
+  if (
+    text.includes('bus') ||
+    text.includes('coach') ||
+    text.includes('باص') ||
+    text.includes('اتوب') ||
+    text.includes('أتوب')
+  ) {
+    return 'bus';
+  }
+  if (
+    text.includes('carshuttle') ||
+    text.includes('sedan') ||
+    ((text.includes('car') || text.includes('سيار') || text.includes('عرب')) &&
+      (seats == null || seats <= 4))
+  ) {
+    return 'carshuttle';
+  }
+
+  if (seats != null) {
+    if (seats > 14) return 'bus';
+    if (seats > 4) return 'minibus';
+    return 'carshuttle';
+  }
+
+  return 'carshuttle';
+}
+
+const CAIRO_TZ = 'Africa/Cairo';
+
+/** YYYY-MM-DD in Africa/Cairo. */
+function cairoDateKey(date: Date): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: CAIRO_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
+
+function sameCairoDay(a: Date, b: Date): boolean {
+  return cairoDateKey(a) === cairoDateKey(b);
+}
+
+/**
+ * Next 7 calendar days starting at Cairo local today.
+ * Each entry is UTC noon on that Y-M-D so weekday/dd-MM stay stable.
+ */
+function nextSevenCairoDays(now: Date): Date[] {
+  const [y, m, d] = cairoDateKey(now).split('-').map(Number);
+  const start = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  return Array.from({ length: 7 }, (_, index) => addDays(start, index));
+}
+
+function weekdayNameAr(dayUtcNoon: Date): string {
+  return dayUtcNoon.toLocaleDateString('ar-EG', {
+    weekday: 'long',
+    timeZone: 'UTC',
+  });
+}
+
+function ddMmUtc(dayUtcNoon: Date): string {
+  const dd = String(dayUtcNoon.getUTCDate()).padStart(2, '0');
+  const mm = String(dayUtcNoon.getUTCMonth() + 1).padStart(2, '0');
+  return `${dd}/${mm}`;
 }
 
 function optionalCoord(raw?: string): number | null {
@@ -752,9 +937,9 @@ function optionalCoord(raw?: string): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-function nextSevenDays(now: Date): Date[] {
-  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  return Array.from({ length: 7 }, (_, index) => addDays(start, index));
+function resolveDurationSeconds(durationSeconds: number | null | undefined): number {
+  // Same default used by booking overlap checks when DurationSeconds is unset.
+  return durationSeconds && durationSeconds > 0 ? durationSeconds : 3600;
 }
 
 function platformOffer(
@@ -769,19 +954,14 @@ function platformOffer(
   sourceAddress?: string,
   destinationAddress?: string,
 ) {
-  const durationMs =
-    trip.route.durationSeconds && trip.route.durationSeconds > 0
-      ? trip.route.durationSeconds * 1000
-      : 0;
+  const durationMs = resolveDurationSeconds(trip.route.durationSeconds) * 1000;
   return {
     id: trip.id,
     pickupWalkLabel: '',
     pickupAddress: sourceAddress ?? trip.route.name,
     pickupTime: formatHm(trip.scheduledAt),
     dropoffAddress: destinationAddress ?? trip.route.description ?? trip.route.name,
-    dropoffTime: durationMs
-      ? formatHm(new Date(trip.scheduledAt.getTime() + durationMs))
-      : '',
+    dropoffTime: formatHm(new Date(trip.scheduledAt.getTime() + durationMs)),
     dropoffWalkLabel: '',
     plateLabel: trip.referenceCode ?? '',
     badgeVariant: 'shuttle',
