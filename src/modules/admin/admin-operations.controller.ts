@@ -89,7 +89,7 @@ export class AdminRoutesController {
           }
         : {}),
     };
-    const [items, totalCount] = await this.prisma.$transaction([
+    const [items, totalCount] = await Promise.all([
       this.prisma.route.findMany({
         where,
         skip: paging.skip,
@@ -109,7 +109,6 @@ export class AdminRoutesController {
   @Get(':id')
   async get(@Param('id') id: string) {
     const route = await this.requireRoute(id);
-    const now = new Date();
     const [stops, tripCount, pricingCount, stats] = await Promise.all([
       this.prisma.stop.findMany({
         where: { routeId: id, isDeleted: false },
@@ -119,46 +118,11 @@ export class AdminRoutesController {
       this.prisma.pricingRule.count({
         where: { routeId: id, isDeleted: false, isActive: true },
       }),
-      this.prisma.$queryRaw<
-        Array<{
-          upcomingTripCount: bigint | number;
-          upcomingUnassignedCount: bigint | number;
-          completedTripCount: bigint | number;
-          confirmedBookingCount: bigint | number;
-          confirmedSeatCount: bigint | number;
-          confirmedRevenue: unknown;
-          remainingSeats: bigint | number;
-        }>
-      >(Prisma.sql`
-        SELECT
-          COALESCE(SUM(CASE
-            WHEN t."Status" IN (${TripStatus.Scheduled}, ${TripStatus.DriverAssigned})
-             AND t."ScheduledAt" >= ${now} THEN 1 ELSE 0 END), 0)::int AS "upcomingTripCount",
-          COALESCE(SUM(CASE
-            WHEN t."Status" = ${TripStatus.Scheduled}
-             AND t."DriverId" IS NULL
-             AND t."ScheduledAt" >= ${now} THEN 1 ELSE 0 END), 0)::int AS "upcomingUnassignedCount",
-          COALESCE(SUM(CASE WHEN t."Status" = ${TripStatus.Completed} THEN 1 ELSE 0 END), 0)::int AS "completedTripCount",
-          COALESCE(SUM(s.confirmed_bookings), 0)::int AS "confirmedBookingCount",
-          COALESCE(SUM(s.confirmed_seats), 0)::int AS "confirmedSeatCount",
-          COALESCE(SUM(s.confirmed_revenue), 0) AS "confirmedRevenue",
-          COALESCE(SUM(t."AvailableSeats"), 0)::int AS "remainingSeats"
-        FROM "TripsSet" t
-        LEFT JOIN LATERAL (
-          SELECT
-            COALESCE(SUM(CASE WHEN b."IsDeleted" = false AND b."Status" = ${BookingStatus.Confirmed} THEN 1 ELSE 0 END), 0)::int AS confirmed_bookings,
-            COALESCE(SUM(CASE WHEN b."IsDeleted" = false AND b."Status" = ${BookingStatus.Confirmed} THEN b."SeatCount" ELSE 0 END), 0)::int AS confirmed_seats,
-            COALESCE(SUM(CASE WHEN b."IsDeleted" = false AND b."Status" = ${BookingStatus.Confirmed} THEN b."TotalAmount" ELSE 0 END), 0) AS confirmed_revenue
-          FROM "BookingsSet" b
-          WHERE b."TripId" = t."Id"
-        ) s ON true
-        WHERE t."RouteId" = ${id}
-          AND t."IsDeleted" = false
-      `),
+      this.routeTripStats(id),
     ]);
-    const row = stats[0];
-    const confirmedSeatCount = Number(row?.confirmedSeatCount ?? 0);
-    const remainingSeats = Number(row?.remainingSeats ?? 0);
+    const row = stats;
+    const confirmedSeatCount = Number(row.confirmedSeatCount ?? 0);
+    const remainingSeats = Number(row.remainingSeats ?? 0);
     return ApiResponse.ok({
       route: mapRoute({
         ...route,
@@ -174,12 +138,12 @@ export class AdminRoutesController {
       operations: {
         pricingLinked: pricingCount > 0,
         activePricingRules: pricingCount,
-        upcomingTripCount: Number(row?.upcomingTripCount ?? 0),
-        upcomingUnassignedCount: Number(row?.upcomingUnassignedCount ?? 0),
-        completedTripCount: Number(row?.completedTripCount ?? 0),
-        confirmedBookingCount: Number(row?.confirmedBookingCount ?? 0),
+        upcomingTripCount: Number(row.upcomingTripCount ?? 0),
+        upcomingUnassignedCount: Number(row.upcomingUnassignedCount ?? 0),
+        completedTripCount: Number(row.completedTripCount ?? 0),
+        confirmedBookingCount: Number(row.confirmedBookingCount ?? 0),
         confirmedSeatCount,
-        confirmedRevenue: money(Number(row?.confirmedRevenue ?? 0)),
+        confirmedRevenue: money(Number(row.confirmedRevenue ?? 0)),
         occupancyPercent: occupancyPercent(confirmedSeatCount, remainingSeats),
         association: 'Trip.routeId',
       },
@@ -255,6 +219,60 @@ export class AdminRoutesController {
       throw new NotFoundException('الخط غير موجود', ErrorCodes.RouteNotFound);
     }
     return route;
+  }
+
+  private async routeTripStats(id: string) {
+    const empty = {
+      upcomingTripCount: 0,
+      upcomingUnassignedCount: 0,
+      completedTripCount: 0,
+      confirmedBookingCount: 0,
+      confirmedSeatCount: 0,
+      confirmedRevenue: 0,
+      remainingSeats: 0,
+    };
+    const now = new Date();
+    try {
+      const stats = await this.prisma.$queryRaw<
+        Array<{
+          upcomingTripCount: bigint | number;
+          upcomingUnassignedCount: bigint | number;
+          completedTripCount: bigint | number;
+          confirmedBookingCount: bigint | number;
+          confirmedSeatCount: bigint | number;
+          confirmedRevenue: unknown;
+          remainingSeats: bigint | number;
+        }>
+      >(Prisma.sql`
+        SELECT
+          COALESCE(SUM(CASE
+            WHEN t."Status" IN (${TripStatus.Scheduled}, ${TripStatus.DriverAssigned})
+             AND t."ScheduledAt" >= ${now} THEN 1 ELSE 0 END), 0)::int AS "upcomingTripCount",
+          COALESCE(SUM(CASE
+            WHEN t."Status" = ${TripStatus.Scheduled}
+             AND t."DriverId" IS NULL
+             AND t."ScheduledAt" >= ${now} THEN 1 ELSE 0 END), 0)::int AS "upcomingUnassignedCount",
+          COALESCE(SUM(CASE WHEN t."Status" = ${TripStatus.Completed} THEN 1 ELSE 0 END), 0)::int AS "completedTripCount",
+          COALESCE(SUM(s.confirmed_bookings), 0)::int AS "confirmedBookingCount",
+          COALESCE(SUM(s.confirmed_seats), 0)::int AS "confirmedSeatCount",
+          COALESCE(SUM(s.confirmed_revenue), 0) AS "confirmedRevenue",
+          COALESCE(SUM(t."AvailableSeats"), 0)::int AS "remainingSeats"
+        FROM "TripsSet" t
+        LEFT JOIN LATERAL (
+          SELECT
+            COALESCE(SUM(CASE WHEN b."IsDeleted" = false AND b."Status" = ${BookingStatus.Confirmed} THEN 1 ELSE 0 END), 0)::int AS confirmed_bookings,
+            COALESCE(SUM(CASE WHEN b."IsDeleted" = false AND b."Status" = ${BookingStatus.Confirmed} THEN b."SeatCount" ELSE 0 END), 0)::int AS confirmed_seats,
+            COALESCE(SUM(CASE WHEN b."IsDeleted" = false AND b."Status" = ${BookingStatus.Confirmed} THEN b."TotalAmount" ELSE 0 END), 0) AS confirmed_revenue
+          FROM "BookingsSet" b
+          WHERE b."TripId" = t."Id"
+        ) s ON true
+        WHERE t."RouteId" = CAST(${id} AS uuid)
+          AND t."IsDeleted" = false
+      `);
+      return stats[0] ?? empty;
+    } catch {
+      return empty;
+    }
   }
 
   private async replaceRouteStops(id: string, stops: StopWrite[]) {
