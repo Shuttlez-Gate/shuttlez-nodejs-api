@@ -167,46 +167,83 @@ export class GroupsService {
   async join(groupId: string) {
     const userId = this.currentUser.requireUserId();
     const group = await this.requireGroup(groupId);
-    if (group.membershipLocked || group.status !== GroupRequestStatus.Draft) {
-      throw new AppException(
-        'لا يمكن الانضمام لهذه المجموعة',
-        400,
-        ErrorCodes.GroupMembershipLocked,
-      );
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const current = await tx.groupRequest.findFirst({
+          where: { id: group.id, isDeleted: false },
+        });
+        if (
+          !current ||
+          current.membershipLocked ||
+          current.status !== GroupRequestStatus.Draft
+        ) {
+          throw new AppException(
+            'لا يمكن الانضمام لهذه المجموعة',
+            400,
+            ErrorCodes.GroupMembershipLocked,
+          );
+        }
+
+        const already = await tx.groupMember.findFirst({
+          where: {
+            groupRequestId: group.id,
+            userId,
+            isDeleted: false,
+          },
+        });
+        if (already) {
+          throw new AppException(
+            'أنت عضو بالفعل في هذه المجموعة',
+            400,
+            ErrorCodes.GroupDuplicateMember,
+          );
+        }
+
+        const claimed = await tx.groupRequest.updateMany({
+          where: {
+            id: group.id,
+            isDeleted: false,
+            status: GroupRequestStatus.Draft,
+            membershipLocked: false,
+            joinedMemberCount: { lt: current.capacity },
+          },
+          data: {
+            joinedMemberCount: { increment: 1 },
+            updatedAt: utcNow(),
+          },
+        });
+        if (claimed.count !== 1) {
+          throw new AppException(
+            'المجموعة ممتلئة',
+            400,
+            ErrorCodes.GroupCapacityExceeded,
+          );
+        }
+
+        await tx.groupMember.create({
+          data: {
+            id: newId(),
+            groupRequestId: group.id,
+            userId,
+            isOrganizer: false,
+            joinedAt: utcNow(),
+            ...baseFields(),
+          },
+        });
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new AppException(
+          'أنت عضو بالفعل في هذه المجموعة',
+          400,
+          ErrorCodes.GroupDuplicateMember,
+        );
+      }
+      throw error;
     }
-    if (group.members.some((m) => m.userId === userId && !m.isDeleted)) {
-      throw new AppException(
-        'أنت عضو بالفعل في هذه المجموعة',
-        400,
-        ErrorCodes.GroupDuplicateMember,
-      );
-    }
-    if (group.joinedMemberCount >= group.capacity) {
-      throw new AppException(
-        'المجموعة ممتلئة',
-        400,
-        ErrorCodes.GroupCapacityExceeded,
-      );
-    }
-    await this.prisma.$transaction([
-      this.prisma.groupMember.create({
-        data: {
-          id: newId(),
-          groupRequestId: group.id,
-          userId,
-          isOrganizer: false,
-          joinedAt: utcNow(),
-          ...baseFields(),
-        },
-      }),
-      this.prisma.groupRequest.update({
-        where: { id: group.id },
-        data: {
-          joinedMemberCount: { increment: 1 },
-          updatedAt: utcNow(),
-        },
-      }),
-    ]);
     return this.byId(group.id);
   }
 
@@ -379,6 +416,10 @@ export class GroupsService {
           displayName: m.user.fullName,
           isOrganizer: m.isOrganizer,
           joinedAt: m.joinedAt,
+          phone: m.user.phone,
+          avatarUrl: m.user.avatarUrl,
+          ratingAverage: Number(m.user.ratingAverage),
+          ratingCount: m.user.ratingCount,
         })),
       distanceKm: group.distanceKm == null ? null : money(group.distanceKm),
     };
