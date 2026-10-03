@@ -82,6 +82,11 @@ export class GroupsController {
     return ApiResponse.ok(await this.groups.mine());
   }
 
+  @Get('invite/:code')
+  async invite(@Param('code') code: string) {
+    return ApiResponse.ok(await this.groups.invite(code));
+  }
+
   @Get(':groupId')
   async byId(@Param('groupId') groupId: string) {
     return ApiResponse.ok(await this.groups.byId(groupId));

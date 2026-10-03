@@ -13,6 +13,7 @@ import { newId, utcNow } from '../../common/utils/date.util';
 import { money, refCode, requireCash, splitEarnings } from '../../common/utils/money';
 import { groupStatusLabel } from '../../common/utils/enums-map';
 import { FareService } from '../pricing/fare.service';
+import { GroupGateway } from '../realtime/realtime.gateway';
 
 @Injectable()
 export class GroupsService {
@@ -20,6 +21,7 @@ export class GroupsService {
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
     private readonly fare: FareService,
+    private readonly groupHub: GroupGateway,
   ) {}
 
   async quote(query: {
@@ -244,7 +246,7 @@ export class GroupsService {
       }
       throw error;
     }
-    return this.byId(group.id);
+    return this.broadcast(group.id);
   }
 
   async leave(groupId: string) {
@@ -278,7 +280,7 @@ export class GroupsService {
         data: { joinedMemberCount: { decrement: 1 }, updatedAt: utcNow() },
       }),
     ]);
-    return this.byId(group.id);
+    return this.broadcast(group.id);
   }
 
   async confirm(groupId: string, paymentMethod?: string) {
@@ -306,7 +308,7 @@ export class GroupsService {
         updatedAt: utcNow(),
       },
     });
-    return this.byId(group.id);
+    return this.broadcast(group.id);
   }
 
   async mine() {
@@ -322,6 +324,23 @@ export class GroupsService {
       orderBy: { createdAt: 'desc' },
     });
     return items.map((g) => this.mapGroup(g));
+  }
+
+  private async broadcast(groupId: string) {
+    const group = await this.requireGroup(groupId);
+    const mapped = this.mapGroup(group);
+    this.groupHub.publish(mapped);
+    return mapped;
+  }
+
+  async invite(code: string) {
+    this.currentUser.requireUserId();
+    const cleaned = code.trim();
+    if (!/^GR-\d{8}-\d{4}$/.test(cleaned)) {
+      throw new NotFoundException('المجموعة غير موجودة', ErrorCodes.GroupNotFound);
+    }
+    const group = await this.requireGroup(cleaned);
+    return this.mapGroup(group);
   }
 
   async byId(groupId: string) {
@@ -359,7 +378,7 @@ export class GroupsService {
         updatedAt: utcNow(),
       },
     });
-    return this.byId(group.id);
+    return this.broadcast(group.id);
   }
 
   private async requireGroup(idOrCode: string) {
