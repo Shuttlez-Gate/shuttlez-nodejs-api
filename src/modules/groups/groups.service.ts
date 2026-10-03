@@ -382,10 +382,11 @@ export class GroupsService {
   }
 
   private async requireGroup(idOrCode: string) {
+    const key = idOrCode.trim();
     const group = await this.prisma.groupRequest.findFirst({
       where: {
         isDeleted: false,
-        OR: [{ id: idOrCode }, { referenceCode: idOrCode }],
+        ...(isGroupUuid(key) ? { id: key } : { referenceCode: key }),
       },
       include: groupInclude,
     });
@@ -443,6 +444,12 @@ export class GroupsService {
       distanceKm: group.distanceKm == null ? null : money(group.distanceKm),
     };
   }
+}
+
+function isGroupUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    value,
+  );
 }
 
 const groupInclude = {

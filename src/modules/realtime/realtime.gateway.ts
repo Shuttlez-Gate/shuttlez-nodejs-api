@@ -96,6 +96,12 @@ export class SupportChatGateway {
   }
 }
 
+function isHubUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    value,
+  );
+}
+
 export type GroupUpdatedPayload = {
   id: string;
   organizerUserId: string;
@@ -132,7 +138,7 @@ export class GroupGateway {
     const group = await this.prisma.groupRequest.findFirst({
       where: {
         isDeleted: false,
-        OR: [{ id }, { referenceCode: id }],
+        ...(isHubUuid(id) ? { id } : { referenceCode: id }),
       },
       select: { id: true, organizerUserId: true },
     });
