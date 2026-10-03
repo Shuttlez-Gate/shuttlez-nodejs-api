@@ -476,14 +476,22 @@ export class AdminDriversController {
     body: {
       phone: string;
       fullName?: string;
-      vehicleId?: string;
       email?: string;
       gender?: string;
       verificationStatus?: string;
       isActive?: boolean;
       isOnline?: boolean;
       nationalId?: string;
+      birthDate?: string | null;
+      licenseNumber?: string;
+      licenseType?: string;
+      licenseExpiry?: string | null;
+      vehicleKind?: string;
+      vehicleModelName?: string;
+      manufactureYear?: number | null;
       plateNumber?: string;
+      vehicleColor?: string;
+      seats?: number | null;
       adminNotes?: string;
     },
   ) {
@@ -520,13 +528,16 @@ export class AdminDriversController {
       data: {
         id: newId(),
         userId: user.id,
-        vehicleId: body.vehicleId,
         isActive: body.isActive ?? true,
         isOnline: body.isOnline ?? false,
         verificationStatus: parseVerification(body.verificationStatus),
-        nationalId: body.nationalId,
-        plateNumber: body.plateNumber,
-        adminNotes: body.adminNotes,
+        nationalId: emptyToNull(body.nationalId),
+        birthDate: parseOptionalDate(body.birthDate) ?? null,
+        licenseNumber: emptyToNull(body.licenseNumber),
+        licenseType: emptyToNull(body.licenseType),
+        licenseExpiry: parseOptionalDate(body.licenseExpiry) ?? null,
+        ...captainVehicleWrite(body),
+        adminNotes: emptyToNull(body.adminNotes),
         ratingAverage: 0,
         ratingCount: 0,
         ...baseFields(),
@@ -545,16 +556,24 @@ export class AdminDriversController {
     @Param('id') id: string,
     @Body()
     body: {
-      vehicleId?: string | null;
       isOnline?: boolean;
       isActive?: boolean;
       fullName?: string;
       email?: string;
+      gender?: string;
       verificationStatus?: string;
       nationalId?: string;
+      birthDate?: string | null;
+      licenseNumber?: string;
+      licenseType?: string;
+      licenseExpiry?: string | null;
+      vehicleKind?: string;
+      vehicleModelName?: string;
+      manufactureYear?: number | null;
       plateNumber?: string;
+      vehicleColor?: string;
+      seats?: number | null;
       adminNotes?: string;
-      seats?: number;
     },
   ) {
     const driver = await this.prisma.driver.findFirst({
@@ -568,22 +587,31 @@ export class AdminDriversController {
       data: {
         fullName: body.fullName,
         email: body.email,
+        gender: body.gender === undefined ? undefined : parseGender(body.gender),
         updatedAt: utcNow(),
       },
     });
     const updated = await this.prisma.driver.update({
       where: { id },
       data: {
-        vehicleId: body.vehicleId === undefined ? driver.vehicleId : body.vehicleId,
         isOnline: body.isOnline ?? driver.isOnline,
         isActive: body.isActive ?? driver.isActive,
         verificationStatus: body.verificationStatus
           ? parseVerification(body.verificationStatus)
           : driver.verificationStatus,
-        nationalId: body.nationalId ?? driver.nationalId,
-        plateNumber: body.plateNumber ?? driver.plateNumber,
-        adminNotes: body.adminNotes ?? driver.adminNotes,
-        seats: body.seats ?? driver.seats,
+        nationalId: body.nationalId === undefined ? driver.nationalId : emptyToNull(body.nationalId),
+        birthDate:
+          body.birthDate === undefined ? driver.birthDate : parseOptionalDate(body.birthDate) ?? null,
+        licenseNumber:
+          body.licenseNumber === undefined ? driver.licenseNumber : emptyToNull(body.licenseNumber),
+        licenseType:
+          body.licenseType === undefined ? driver.licenseType : emptyToNull(body.licenseType),
+        licenseExpiry:
+          body.licenseExpiry === undefined
+            ? driver.licenseExpiry
+            : parseOptionalDate(body.licenseExpiry) ?? null,
+        ...captainVehicleWrite(body, true),
+        adminNotes: body.adminNotes === undefined ? driver.adminNotes : emptyToNull(body.adminNotes),
         updatedAt: utcNow(),
       },
       include: {
@@ -740,6 +768,7 @@ function mapDriverList(d: {
   vehicleKind: string | null;
   plateNumber: string | null;
   vehicleModelName: string | null;
+  seats: number | null;
   user: { phone: string; fullName: string | null };
   vehicle: { plateNumber: string; model: string; type: number } | null;
   _count: { documents: number; trips: number };
@@ -750,10 +779,11 @@ function mapDriverList(d: {
     phone: d.user.phone,
     fullName: d.user.fullName,
     vehicleId: d.vehicleId,
-    vehiclePlate: d.vehicle?.plateNumber ?? d.plateNumber,
-    vehicleModel: d.vehicle?.model ?? d.vehicleModelName,
+    vehiclePlate: d.plateNumber ?? d.vehicle?.plateNumber,
+    vehicleModel: d.vehicleModelName ?? d.vehicle?.model,
     vehicleKind: d.vehicleKind,
     vehicleType: d.vehicle ? vehicleTypeLabel(d.vehicle.type) : d.vehicleKind,
+    seats: d.seats,
     ratingAverage: money(d.ratingAverage),
     ratingCount: d.ratingCount,
     isOnline: d.isOnline,
@@ -787,4 +817,54 @@ function mapDoc(d: {
     notes: d.notes,
     createdAt: d.createdAt,
   };
+}
+
+function emptyToNull(value?: string | null): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function parseOptionalDate(value?: string | null): Date | null {
+  const raw = value?.trim();
+  if (!raw) return null;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function parseOptionalInt(value?: number | string | null): number | null {
+  if (value == null || String(value).trim() === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+function captainVehicleWrite(
+  body: {
+    vehicleKind?: string | null;
+    vehicleModelName?: string | null;
+    manufactureYear?: number | string | null;
+    plateNumber?: string | null;
+    vehicleColor?: string | null;
+    seats?: number | string | null;
+  },
+  partial = false,
+) {
+  const data: {
+    vehicleKind?: string | null;
+    vehicleModelName?: string | null;
+    manufactureYear?: number | null;
+    plateNumber?: string | null;
+    vehicleColor?: string | null;
+    seats?: number | null;
+  } = {};
+  if (!partial || body.vehicleKind !== undefined) data.vehicleKind = emptyToNull(body.vehicleKind);
+  if (!partial || body.vehicleModelName !== undefined) {
+    data.vehicleModelName = emptyToNull(body.vehicleModelName);
+  }
+  if (!partial || body.manufactureYear !== undefined) {
+    data.manufactureYear = parseOptionalInt(body.manufactureYear);
+  }
+  if (!partial || body.plateNumber !== undefined) data.plateNumber = emptyToNull(body.plateNumber);
+  if (!partial || body.vehicleColor !== undefined) data.vehicleColor = emptyToNull(body.vehicleColor);
+  if (!partial || body.seats !== undefined) data.seats = parseOptionalInt(body.seats);
+  return data;
 }

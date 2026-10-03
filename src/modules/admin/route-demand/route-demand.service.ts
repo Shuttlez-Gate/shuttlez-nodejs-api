@@ -256,7 +256,7 @@ export class RouteDemandService {
       _max: { capacity: true },
     });
     const byType = new Map(fleet.map((row) => [row.type, row._max.capacity ?? 0]));
-    return [VehicleType.CarShuttle, VehicleType.Scooter, VehicleType.MiniBus, VehicleType.Bus]
+    return [VehicleType.CarShuttle, VehicleType.MiniBus, VehicleType.Bus]
       .map((type) => {
         const fleetCap = byType.get(type) ?? 0;
         const capacity = fleetCap > 0 ? fleetCap : DEFAULT_CAPACITY[type] ?? 0;
