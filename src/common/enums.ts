@@ -15,6 +15,7 @@ export const VehicleType = {
   CarShuttle: 1,
   MiniBus: 2,
   Bus: 3,
+  Scooter: 4,
 } as const;
 export type VehicleType = (typeof VehicleType)[keyof typeof VehicleType];
 

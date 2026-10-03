@@ -33,12 +33,15 @@ export function userTypeLabel(value: number): string {
 }
 
 export function parseVehicleType(raw?: string | null): number {
-  const key = (raw ?? '').trim().toLowerCase();
-  if (['minibus', 'mini-bus', 'mini_bus', '2'].includes(key)) {
+  const key = (raw ?? '').trim().toLowerCase().replace(/[\s_-]/g, '');
+  if (['minibus', 'microbus', '2'].includes(key)) {
     return VehicleType.MiniBus;
   }
   if (['bus', '3'].includes(key)) {
     return VehicleType.Bus;
+  }
+  if (['scooter', 'scooters', 'سكوتر', '4'].includes(key)) {
+    return VehicleType.Scooter;
   }
   return VehicleType.CarShuttle;
 }
@@ -49,9 +52,53 @@ export function vehicleTypeLabel(value: number): string {
       return 'MiniBus';
     case VehicleType.Bus:
       return 'Bus';
+    case VehicleType.Scooter:
+      return 'Scooter';
     default:
       return 'CarShuttle';
   }
+}
+
+export type VehicleKindFamily = 'car' | 'scooter' | 'minibus' | 'bus';
+
+export function vehicleKindFamily(raw?: string | number | null): VehicleKindFamily | null {
+  const key = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '');
+  if (!key) return null;
+  if (['1', 'car', 'cars', 'carshuttle', 'shuttlecar', 'shuttlezcar', 'shuttlez', 'سيارة'].includes(key)) {
+    return 'car';
+  }
+  if (['4', 'scooter', 'scooters', 'سكوتر'].includes(key)) {
+    return 'scooter';
+  }
+  if (['2', 'minibus', 'minibuss', 'microbus', 'مينيباص', 'ميكروباص'].includes(key)) {
+    return 'minibus';
+  }
+  if (['3', 'bus', 'باص', 'أتوبيس'].includes(key)) {
+    return 'bus';
+  }
+  return null;
+}
+
+export function vehicleKindsCompatible(
+  required?: string | number | null,
+  captain?: string | number | null,
+): boolean {
+  const need = vehicleKindFamily(required);
+  if (!need) return true;
+  return vehicleKindFamily(captain) === need;
+}
+
+export function captainVehicleKind(driver: {
+  vehicleKind?: string | null;
+  vehicle?: { type?: number | null } | null;
+}): string | null {
+  const kind = driver.vehicleKind?.trim();
+  if (kind) return kind;
+  if (driver.vehicle?.type != null) return vehicleTypeLabel(driver.vehicle.type);
+  return null;
 }
 
 export function parseTripStatus(raw?: string | null): number | undefined {

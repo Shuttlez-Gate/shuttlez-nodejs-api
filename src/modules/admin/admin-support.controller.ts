@@ -26,6 +26,7 @@ import { RidesService } from '../rides/rides.service';
 import { GroupsService } from '../groups/groups.service';
 import { SupportChatGateway } from '../realtime/realtime.gateway';
 import { AdminDashboardService } from './dashboard.service';
+import { assertCaptainEligible } from './captain-eligibility';
 import {
   groupsNeedingCaptainWhere,
   parseOptionalBoolean,
@@ -329,7 +330,9 @@ export class AdminRidesController {
     ]);
     return ApiResponse.ok(
       new PagedResult(
-        items.map((r) => this.rides.mapRide(r)),
+        items.map((r) =>
+          this.rides.mapRide(r, (r as { requestedVehicleKind?: string | null }).requestedVehicleKind ?? null),
+        ),
         paging.page,
         paging.pageSize,
         totalCount,
@@ -354,6 +357,14 @@ export class AdminRidesController {
     if (!driver) {
       throw new NotFoundException('الكابتن غير موجود', ErrorCodes.DriverNotFound);
     }
+    const requestedKind =
+      (ride as { requestedVehicleKind?: string | null }).requestedVehicleKind ?? null;
+    await assertCaptainEligible(this.prisma, {
+      driverId: driver.id,
+      requiredVehicleKind: requestedKind,
+      at: ride.scheduledFor ?? utcNow(),
+      excludeRideId: ride.id,
+    });
     const updated = await this.prisma.rideRequest.update({
       where: { id: rideId },
       data: {
@@ -364,7 +375,7 @@ export class AdminRidesController {
       },
       include: { driver: { include: { user: true, vehicle: true } } },
     });
-    return ApiResponse.ok(this.rides.mapRide(updated), 'تم تعيين الكابتن');
+    return ApiResponse.ok(this.rides.mapRide(updated, requestedKind), 'تم تعيين الكابتن');
   }
 
   @Delete(':rideId/driver')
@@ -457,6 +468,11 @@ export class AdminGroupsController {
     if (!driver) {
       throw new NotFoundException('الكابتن غير موجود', ErrorCodes.DriverNotFound);
     }
+    await assertCaptainEligible(this.prisma, {
+      driverId: driver.id,
+      at: utcNow(),
+      excludeGroupId: group.id,
+    });
     await this.prisma.groupRequest.update({
       where: { id: groupId },
       data: {

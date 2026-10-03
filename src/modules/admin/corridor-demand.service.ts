@@ -370,6 +370,7 @@ function escalationPath(preferred: string) {
 
 function vehicleSlug(type: number) {
   if (type === VehicleType.Bus) return 'bus';
+  if (type === VehicleType.Scooter) return 'scooter';
   if (type === VehicleType.CarShuttle) return 'carshuttle';
   return 'minibus';
 }
@@ -380,6 +381,8 @@ function normalizeVehicle(value?: string | null) {
     case 'carshuttle':
     case 'car_shuttle':
       return 'carshuttle';
+    case 'scooter':
+      return 'scooter';
     case 'bus':
       return 'bus';
     default:

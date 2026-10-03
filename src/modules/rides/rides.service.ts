@@ -100,6 +100,7 @@ export class RidesService {
     toZoneKey?: string;
     paymentMethod?: string;
     scheduledFor?: string;
+    requestedVehicleKind?: string;
   }) {
     const userId = this.currentUser.requireUserId();
     const paymentMethod = requireCash(body.paymentMethod);
@@ -146,7 +147,15 @@ export class RidesService {
         ...baseFields(),
       },
     });
-    return this.mapRide(ride);
+    const requestedVehicleKind = trimVehicleKind(body.requestedVehicleKind);
+    if (requestedVehicleKind) {
+      await this.prisma.$executeRaw`
+        UPDATE "RideRequestsSet"
+        SET "RequestedVehicleKind" = ${requestedVehicleKind}
+        WHERE "Id" = ${ride.id}::uuid
+      `;
+    }
+    return this.mapRide(ride, requestedVehicleKind);
   }
 
   async mine() {
@@ -156,7 +165,8 @@ export class RidesService {
       include: rideInclude,
       orderBy: { createdAt: 'desc' },
     });
-    return items.map((r) => this.mapRide(r));
+    const kinds = await this.requestedVehicleKinds(items.map((item) => item.id));
+    return items.map((r) => this.mapRide(r, kinds.get(r.id) ?? null));
   }
 
   async byId(id: string) {
@@ -171,7 +181,8 @@ export class RidesService {
     if (ride.riderUserId !== userId && !this.currentUser.isAdmin) {
       throw new AppException('غير مصرح', 403);
     }
-    return this.mapRide(ride);
+    const kinds = await this.requestedVehicleKinds([ride.id]);
+    return this.mapRide(ride, kinds.get(ride.id) ?? null);
   }
 
   async cancel(id: string) {
@@ -209,10 +220,11 @@ export class RidesService {
       },
       include: rideInclude,
     });
-    return this.mapRide(updated);
+    const kinds = await this.requestedVehicleKinds([updated.id]);
+    return this.mapRide(updated, kinds.get(updated.id) ?? null);
   }
 
-  mapRide(ride: RideRow) {
+  mapRide(ride: RideRow, requestedVehicleKind: string | null = null) {
     const driver = ride.driver;
     const user = driver?.user;
     const vehicle = driver?.vehicle;
@@ -244,6 +256,7 @@ export class RidesService {
       completedAt: ride.completedAt,
       cancelledAt: ride.cancelledAt,
       scheduledFor: ride.scheduledFor,
+      requestedVehicleKind,
       referenceCode: ride.referenceCode,
       createdAt: ride.createdAt,
       driverPhotoUrl: user?.avatarUrl ?? null,
@@ -264,6 +277,21 @@ export class RidesService {
       captainLocationUpdatedAt: null,
     };
   }
+
+  private async requestedVehicleKinds(ids: string[]) {
+    const unique = [...new Set(ids.filter((id) => id.trim().length > 0))];
+    const kinds = new Map<string, string | null>();
+    if (unique.length === 0) return kinds;
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; kind: string | null }>>`
+      SELECT "Id"::text AS id, "RequestedVehicleKind" AS kind
+      FROM "RideRequestsSet"
+      WHERE "Id"::text IN (${Prisma.join(unique)})
+    `;
+    for (const row of rows) {
+      kinds.set(row.id, row.kind);
+    }
+    return kinds;
+  }
 }
 
 const rideInclude = {
@@ -275,6 +303,12 @@ type RideRow = Prisma.RideRequestGetPayload<{ include: typeof rideInclude }>;
 function trimOrNull(value?: string | null): string | null {
   const v = value?.trim();
   return v ? v : null;
+}
+
+function trimVehicleKind(value?: string | null): string | null {
+  const v = value?.trim();
+  if (!v) return null;
+  return v.slice(0, 40);
 }
 
 function parseScheduledFor(value?: string | null): Date | null {

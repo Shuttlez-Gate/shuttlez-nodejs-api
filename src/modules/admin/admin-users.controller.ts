@@ -737,8 +737,11 @@ function mapDriverList(d: {
   isActive: boolean;
   verificationStatus: number;
   createdAt: Date;
+  vehicleKind: string | null;
+  plateNumber: string | null;
+  vehicleModelName: string | null;
   user: { phone: string; fullName: string | null };
-  vehicle: { plateNumber: string; model: string } | null;
+  vehicle: { plateNumber: string; model: string; type: number } | null;
   _count: { documents: number; trips: number };
 }) {
   return {
@@ -747,8 +750,10 @@ function mapDriverList(d: {
     phone: d.user.phone,
     fullName: d.user.fullName,
     vehicleId: d.vehicleId,
-    vehiclePlate: d.vehicle?.plateNumber,
-    vehicleModel: d.vehicle?.model,
+    vehiclePlate: d.vehicle?.plateNumber ?? d.plateNumber,
+    vehicleModel: d.vehicle?.model ?? d.vehicleModelName,
+    vehicleKind: d.vehicleKind,
+    vehicleType: d.vehicle ? vehicleTypeLabel(d.vehicle.type) : d.vehicleKind,
     ratingAverage: money(d.ratingAverage),
     ratingCount: d.ratingCount,
     isOnline: d.isOnline,

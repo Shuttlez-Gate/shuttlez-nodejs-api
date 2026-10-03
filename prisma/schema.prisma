@@ -674,6 +674,7 @@ model RideRequest {
   completedAt          DateTime?     @map("CompletedAt") @db.Timestamptz(6)
   cancelledAt          DateTime?     @map("CancelledAt") @db.Timestamptz(6)
   scheduledFor         DateTime?     @map("ScheduledFor") @db.Timestamptz(6)
+  requestedVehicleKind String?       @map("RequestedVehicleKind") @db.VarChar(40)
   referenceCode        String?       @map("ReferenceCode") @db.VarChar(32)
   createdAt            DateTime      @map("CreatedAt") @db.Timestamptz(6)
   updatedAt            DateTime?     @map("UpdatedAt") @db.Timestamptz(6)

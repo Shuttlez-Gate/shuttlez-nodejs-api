@@ -53,6 +53,7 @@ import {
   captainAssignmentWrite,
   captainUnassignmentWrite,
 } from './admin-mutation-contracts';
+import { assertCaptainEligible } from './captain-eligibility';
 
 @ApiTags('admin-routes')
 @AdminOnly()
@@ -427,6 +428,13 @@ export class AdminTripsController {
     if (!driver) {
       throw new NotFoundException('الكابتن غير موجود', ErrorCodes.DriverNotFound);
     }
+    await assertCaptainEligible(this.prisma, {
+      driverId: driver.id,
+      requiredVehicleKind: trip.route.vehicleKind,
+      at: trip.scheduledAt,
+      durationSeconds: trip.route.durationSeconds,
+      excludeTripId: trip.id,
+    });
     const assignment = captainAssignmentWrite(trip.status, driver.id);
     const updated = await this.prisma.trip.update({
       where: { id: trip.id },
@@ -508,6 +516,22 @@ export class AdminTripsController {
     if (instants.length === 0) {
       return ApiResponse.ok(0, 'تم جدولة الرحلات');
     }
+    const route = await this.prisma.route.findFirst({
+      where: { id: body.routeId, isDeleted: false },
+    });
+    if (!route) {
+      throw new NotFoundException('المسار غير موجود', ErrorCodes.RouteNotFound);
+    }
+    if (body.driverId) {
+      for (const scheduledAt of instants) {
+        await assertCaptainEligible(this.prisma, {
+          driverId: body.driverId,
+          requiredVehicleKind: route.vehicleKind,
+          at: scheduledAt,
+          durationSeconds: route.durationSeconds,
+        });
+      }
+    }
     await this.prisma.$transaction(async (tx) => {
       for (const scheduledAt of instants) {
         await tx.trip.create({
@@ -540,6 +564,18 @@ export class AdminTripsController {
       throw new AppException('عدد المقاعد المتاحة مطلوب ويجب أن يكون 1 على الأقل', 400);
     }
     const status = parseTripStatus(body.status) ?? TripStatus.Scheduled;
+    if (body.driverId) {
+      const route = await this.prisma.route.findFirst({
+        where: { id: body.routeId, isDeleted: false },
+      });
+      await assertCaptainEligible(this.prisma, {
+        driverId: body.driverId,
+        requiredVehicleKind: route?.vehicleKind,
+        at: new Date(body.scheduledAt),
+        durationSeconds: route?.durationSeconds,
+        excludeTripId: id,
+      });
+    }
     if (id) {
       await this.requireTrip(id);
       const updated = await this.prisma.trip.update({
@@ -1107,6 +1143,7 @@ function mapRoute(r: {
   ownerType: number;
   ownerDriverId: string | null;
   publishStatus: number;
+  vehicleKind?: string | null;
   createdAt: Date;
   _count: { stops: number; trips: number };
 }) {
@@ -1125,6 +1162,7 @@ function mapRoute(r: {
     ownerType: r.ownerType,
     ownerDriverId: r.ownerDriverId,
     publishStatus: r.publishStatus,
+    vehicleKind: r.vehicleKind ?? null,
     stopCount: r._count.stops,
     tripCount: r._count.trips,
     createdAt: r.createdAt,
@@ -1179,7 +1217,7 @@ function mapTripFinance(
 function mapTripCore(t: {
   id: string;
   routeId: string;
-  route: { name: string };
+  route: { name: string; vehicleKind?: string | null };
   driverId: string | null;
   driver: { user: { fullName: string | null } } | null;
   status: number;
@@ -1203,6 +1241,7 @@ function mapTripCore(t: {
     id: t.id,
     routeId: t.routeId,
     routeName: t.route.name,
+    vehicleKind: t.route.vehicleKind ?? null,
     driverId: t.driverId,
     driverName: t.driver?.user.fullName ?? null,
     status: tripStatusLabel(t.status),

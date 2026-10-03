@@ -119,6 +119,9 @@ export function tryParseVehicleType(raw?: string | null): number | null {
   if (['3', 'bus'].includes(key)) {
     return VehicleType.Bus;
   }
+  if (['4', 'scooter', 'scooters'].includes(key)) {
+    return VehicleType.Scooter;
+  }
   return null;
 }
 

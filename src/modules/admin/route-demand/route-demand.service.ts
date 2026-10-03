@@ -13,6 +13,7 @@ import { baseFields } from '../../../common/utils/entity-defaults';
 import { money, normalizeMoney, refCode } from '../../../common/utils/money';
 import { tripStatusLabel, vehicleTypeLabel } from '../../../common/utils/enums-map';
 import { pageRequestFrom, PagedResult } from '../../../common/paged-result';
+import { assertCaptainEligible } from '../captain-eligibility';
 import { isConfirmedDemandPassenger } from './demand-confirmation';
 import {
   buildDisplayLabel,
@@ -49,6 +50,7 @@ const DEFAULT_CAPACITY: Record<number, number> = {
   [VehicleType.CarShuttle]: 4,
   [VehicleType.MiniBus]: 13,
   [VehicleType.Bus]: 24,
+  [VehicleType.Scooter]: 1,
 };
 
 export interface DemandQuery {
@@ -254,7 +256,7 @@ export class RouteDemandService {
       _max: { capacity: true },
     });
     const byType = new Map(fleet.map((row) => [row.type, row._max.capacity ?? 0]));
-    return [VehicleType.CarShuttle, VehicleType.MiniBus, VehicleType.Bus]
+    return [VehicleType.CarShuttle, VehicleType.Scooter, VehicleType.MiniBus, VehicleType.Bus]
       .map((type) => {
         const fleetCap = byType.get(type) ?? 0;
         const capacity = fleetCap > 0 ? fleetCap : DEFAULT_CAPACITY[type] ?? 0;
@@ -326,6 +328,16 @@ export class RouteDemandService {
         'حالة غير مسموحة. المسموح: ' + ALLOWED_STATUSES.join(' / '),
         400,
       );
+    }
+    if (body.assignedDriverId) {
+      const current = await this.rowByKey(routeKey);
+      const readinessKind = (current.readiness as { vehicleTypeName?: string | null } | null)
+        ?.vehicleTypeName;
+      await assertCaptainEligible(this.prisma, {
+        driverId: body.assignedDriverId,
+        requiredVehicleKind: readinessKind || current.recommendedVehicle || null,
+        at: utcNow(),
+      });
     }
     await this.upsertState(routeKey, {
       status,
@@ -447,6 +459,15 @@ export class RouteDemandService {
       if (!driver) {
         throw new AppException('الكابتن غير موجود أو غير نشط.', 400, ErrorCodes.DriverNotFound);
       }
+      await assertCaptainEligible(this.prisma, {
+        driverId: driver.id,
+        requiredVehicleKind:
+          vehicleTypeLabel(resolved.vehicleType) ||
+          (readiness.vehicleType as string | null) ||
+          route.vehicleKind,
+        at: scheduledAt,
+        durationSeconds: route.durationSeconds,
+      });
       driverId = driver.id;
     }
 
@@ -1391,6 +1412,8 @@ function vehicleTypeName(type: number) {
       return 'MiniBus';
     case VehicleType.Bus:
       return 'Bus';
+    case VehicleType.Scooter:
+      return 'Scooter';
     default:
       return 'CarShuttle';
   }
@@ -1402,6 +1425,8 @@ function vehicleTypeNameAr(type: number) {
       return 'ميكروباص';
     case VehicleType.Bus:
       return 'أتوبيس';
+    case VehicleType.Scooter:
+      return 'سكوتر';
     default:
       return 'سيارة شاتلز';
   }
@@ -1413,6 +1438,8 @@ function vehicleDisplayName(type: number) {
       return 'Microbus';
     case VehicleType.Bus:
       return 'Bus';
+    case VehicleType.Scooter:
+      return 'Scooter';
     default:
       return 'Shuttlez Car';
   }
