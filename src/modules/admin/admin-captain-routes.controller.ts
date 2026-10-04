@@ -49,6 +49,22 @@ export class AdminCaptainRoutesController {
     return ApiResponse.ok(await this.captainRoutes.adminGet(id));
   }
 
+  @Post('quote')
+  async quote(
+    @Body()
+    body: {
+      driverId: string;
+      vehicleKind?: string;
+      originLat?: number | null;
+      originLng?: number | null;
+      destLat?: number | null;
+      destLng?: number | null;
+      seatPrice?: number | null;
+    },
+  ) {
+    return ApiResponse.ok(await this.captainRoutes.adminQuote(body));
+  }
+
   @Post()
   async create(
     @Body()
@@ -58,7 +74,13 @@ export class AdminCaptainRoutesController {
       description?: string;
       vehicleKind?: string;
       capacity?: number;
-      stops: Array<{ name: string; latitude: number; longitude: number }>;
+      stops: Array<{
+        name: string;
+        latitude?: number | null;
+        longitude?: number | null;
+        source?: string | null;
+        order?: number | null;
+      }>;
       publish?: boolean;
       pricePerSeat?: number;
       scheduledAt?: string;
@@ -82,7 +104,13 @@ export class AdminCaptainRoutesController {
       description?: string;
       vehicleKind?: string;
       capacity?: number;
-      stops?: Array<{ name: string; latitude: number; longitude: number }>;
+      stops?: Array<{
+        name: string;
+        latitude?: number | null;
+        longitude?: number | null;
+        source?: string | null;
+        order?: number | null;
+      }>;
     },
   ) {
     return ApiResponse.ok(await this.captainRoutes.adminUpdate(id, body), 'تم تحديث مسار الكابتن');

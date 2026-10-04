@@ -451,6 +451,8 @@ export class AdminDriversController {
       vehicleId: driver.vehicleId,
       vehiclePlate: driver.vehicle?.plateNumber,
       vehicleModel: driver.vehicle?.model,
+      vehicleCapacity: driver.vehicle?.capacity ?? null,
+      vehicleLinkedKind: driver.vehicle ? vehicleTypeLabel(driver.vehicle.type) : null,
       ratingAverage: money(driver.ratingAverage),
       ratingCount: driver.ratingCount,
       isOnline: driver.isOnline,

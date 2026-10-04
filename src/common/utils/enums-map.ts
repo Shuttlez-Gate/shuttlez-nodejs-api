@@ -90,6 +90,15 @@ export function defaultCapacityForVehicleKind(raw?: string | number | null): num
   return 4;
 }
 
+export function vehicleTypeIdFromKind(raw?: string | number | null): number | null {
+  const family = vehicleKindFamily(raw);
+  if (family === 'scooter') return VehicleType.Scooter;
+  if (family === 'minibus') return VehicleType.MiniBus;
+  if (family === 'bus') return VehicleType.Bus;
+  if (family === 'car') return VehicleType.CarShuttle;
+  return null;
+}
+
 export function vehicleKindsCompatible(
   required?: string | number | null,
   captain?: string | number | null,

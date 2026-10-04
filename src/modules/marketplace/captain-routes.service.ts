@@ -20,13 +20,14 @@ import {
 } from '../../common/enums';
 import { baseFields } from '../../common/utils/entity-defaults';
 import { newId, utcNow } from '../../common/utils/date.util';
-import { money, refCode } from '../../common/utils/money';
+import { money, refCode, splitEarnings } from '../../common/utils/money';
 import { pageRequestFrom, PagedResult } from '../../common/paged-result';
 import {
   captainVehicleKind,
-  defaultCapacityForVehicleKind,
   vehicleKindsCompatible,
+  vehicleTypeIdFromKind,
 } from '../../common/utils/enums-map';
+import { FareService } from '../pricing/fare.service';
 import { SegmentInventoryService } from './segment-inventory.service';
 import { PushNotificationService } from './push-notification.service';
 import {
@@ -45,13 +46,15 @@ import {
   isRecurringKind,
   tripTimeBucket,
 } from './captain-route-status';
+import {
+  normalizeCaptainStops,
+  persistStopCoords,
+  publicStopCoords,
+  type CaptainStopInput,
+} from './captain-route-stops';
 import { randomBytes } from 'crypto';
 
-type StopInput = {
-  name: string;
-  latitude: number;
-  longitude: number;
-};
+type StopInput = CaptainStopInput;
 
 type DriverCapacitySource = {
   id: string;
@@ -93,6 +96,7 @@ export class CaptainRoutesService {
     private readonly config: ConfigService,
     private readonly segments: SegmentInventoryService,
     private readonly push: PushNotificationService,
+    private readonly fare: FareService,
   ) {}
 
   async listMine() {
@@ -155,17 +159,24 @@ export class CaptainRoutesService {
     const stops = this.normalizeStops(body.stops);
     const first = stops[0];
     const last = stops[stops.length - 1];
-    const vehicleKind = body.vehicleKind ?? captainVehicleKind(driver);
-    const capacity = this.resolveCapacity(body.capacity, driver, vehicleKind);
+    const vehicleKind = body.vehicleKind?.trim() || captainVehicleKind(driver);
+    if (!vehicleKind) {
+      throw new AppException(
+        'الكابتن ليس له نوع مركبة محفوظ. أكمل بيانات المركبة من ملف الكابتن.',
+        400,
+        ErrorCodes.InvalidSeatCount,
+      );
+    }
+    const capacity = this.resolveCapacity(undefined, driver, vehicleKind);
     const created = await this.prisma.route.create({
       data: {
         id: newId(),
         name: (body.name ?? '').trim() || `${first.name} — ${last.name}`,
         description: body.description ?? null,
-        startLatitude: first.latitude,
-        startLongitude: first.longitude,
-        endLatitude: last.latitude,
-        endLongitude: last.longitude,
+        startLatitude: first.latitude as number,
+        startLongitude: first.longitude as number,
+        endLatitude: last.latitude as number,
+        endLongitude: last.longitude as number,
         isActive: false,
         ownerType: RouteOwnerType.Captain,
         ownerDriverId: driver.id,
@@ -177,8 +188,7 @@ export class CaptainRoutesService {
           create: stops.map((stop, index) => ({
             id: newId(),
             name: stop.name,
-            latitude: stop.latitude,
-            longitude: stop.longitude,
+            ...persistStopCoords(stop),
             order: index,
             ...baseFields(),
           })),
@@ -210,7 +220,8 @@ export class CaptainRoutesService {
     const nextStops = body.stops ? this.normalizeStops(body.stops) : null;
     const first = nextStops?.[0];
     const last = nextStops?.[nextStops.length - 1];
-    const capacity = body.capacity ?? route.capacity ?? this.resolveCapacity(undefined, driver, body.vehicleKind ?? route.vehicleKind);
+    const nextKind = body.vehicleKind ?? route.vehicleKind;
+    const capacity = this.resolveCapacity(undefined, driver, nextKind);
 
     await this.prisma.$transaction(async (tx) => {
       await tx.route.update({
@@ -218,14 +229,14 @@ export class CaptainRoutesService {
         data: {
           name: body.name?.trim() || route.name,
           description: body.description ?? route.description,
-          vehicleKind: body.vehicleKind ?? route.vehicleKind,
+          vehicleKind: nextKind,
           capacity,
           ...(first && last
             ? {
-                startLatitude: first.latitude,
-                startLongitude: first.longitude,
-                endLatitude: last.latitude,
-                endLongitude: last.longitude,
+                startLatitude: first.latitude as number,
+                startLongitude: first.longitude as number,
+                endLatitude: last.latitude as number,
+                endLongitude: last.longitude as number,
               }
             : {}),
           updatedAt: utcNow(),
@@ -246,8 +257,7 @@ export class CaptainRoutesService {
             id: newId(),
             routeId: route.id,
             name: stop.name,
-            latitude: stop.latitude,
-            longitude: stop.longitude,
+            ...persistStopCoords(stop),
             order: index,
             ...baseFields(),
           },
@@ -363,8 +373,8 @@ export class CaptainRoutesService {
     const capacity =
       body.availableSeats ?? route.capacity ?? this.resolveCapacity(undefined, driver, route.vehicleKind);
     const price = Number(body.pricePerSeat);
-    if (!(price >= 0)) {
-      throw new AppException('السعر غير صالح', 400, ErrorCodes.PricingNotAvailable);
+    if (!(price > 0)) {
+      throw new AppException('سعر المقعد يجب أن يكون أكبر من صفر', 400, ErrorCodes.PricingNotAvailable);
     }
 
     const createdIds: string[] = [];
@@ -647,8 +657,7 @@ export class CaptainRoutesService {
       stops: route.stops.map((stop) => ({
         id: stop.id,
         name: stop.name,
-        latitude: stop.latitude,
-        longitude: stop.longitude,
+        ...publicStopCoords(stop),
         order: stop.order,
       })),
       upcomingTrips: route.trips.map((trip) => ({
@@ -779,8 +788,7 @@ export class CaptainRoutesService {
         stops: stops.map((stop) => ({
           id: stop.id,
           name: stop.name,
-          latitude: stop.latitude,
-          longitude: stop.longitude,
+          ...publicStopCoords(stop),
           order: stop.order,
         })),
         stopsCount: stops.length,
@@ -1014,8 +1022,7 @@ export class CaptainRoutesService {
         stops: stops.map((stop) => ({
           id: stop.id,
           name: stop.name,
-          latitude: stop.latitude,
-          longitude: stop.longitude,
+          ...publicStopCoords(stop),
           order: stop.order,
         })),
         vehicleKind: route.vehicleKind,
@@ -1054,6 +1061,7 @@ export class CaptainRoutesService {
       pricing: {
         pricePerSeat: nextTrip?.pricePerSeat ?? null,
         basis: 'trip.pricePerSeat',
+        ...(await this.quoteSnapshot(route.id, route.vehicleKind, nextTrip?.pricePerSeat ?? null)),
       },
       schedule: {
         type: scheduleLabel(nextTrip?.recurrenceKind),
@@ -1075,6 +1083,68 @@ export class CaptainRoutesService {
     };
   }
 
+  async adminQuote(body: {
+    driverId: string;
+    vehicleKind?: string;
+    originLat?: number | null;
+    originLng?: number | null;
+    destLat?: number | null;
+    destLng?: number | null;
+    seatPrice?: number | null;
+  }) {
+    const driver = await this.requireDriverById(body.driverId);
+    const vehicleKind = body.vehicleKind?.trim() || captainVehicleKind(driver);
+    if (!vehicleKind) {
+      throw new AppException(
+        'الكابتن ليس له نوع مركبة محفوظ. أكمل بيانات المركبة من ملف الكابتن.',
+        400,
+        ErrorCodes.InvalidSeatCount,
+      );
+    }
+    const capacity = this.resolveCapacity(undefined, driver, vehicleKind);
+    const vehicleType = vehicleTypeIdFromKind(vehicleKind);
+    const distanceKm = this.fare.distanceKm(
+      body.originLat,
+      body.originLng,
+      body.destLat,
+      body.destLng,
+    );
+    let suggestedSeatPrice: number | null = null;
+    if (vehicleType != null) {
+      const rule = await this.prisma.pricingRule.findFirst({
+        where: {
+          isDeleted: false,
+          isActive: true,
+          vehicleType,
+          routeId: null,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (rule) {
+        suggestedSeatPrice = money(rule.oneWayPrice);
+      }
+    }
+    const requested = body.seatPrice == null ? null : Number(body.seatPrice);
+    const seatPrice =
+      requested != null && Number.isFinite(requested) && requested > 0
+        ? money(requested)
+        : null;
+    const commissionPercent = await this.fare.platformCommissionPercent(null, vehicleType);
+    const priced = seatPrice ?? suggestedSeatPrice ?? 0;
+    const split = splitEarnings(priced > 0 ? priced : 0, commissionPercent);
+    return {
+      vehicleKind,
+      capacity,
+      distanceKm,
+      suggestedSeatPrice,
+      seatPrice,
+      commissionPercent,
+      commissionRate: split.commissionRate,
+      commissionAmount: split.commissionAmount,
+      captainEarning: split.captainEarnings,
+    };
+  }
+
   async adminCreate(body: {
     driverId: string;
     name?: string;
@@ -1091,24 +1161,40 @@ export class CaptainRoutesService {
     rangeStart?: string;
     rangeEnd?: string;
   }) {
+    if (!body.driverId?.trim()) {
+      throw new AppException('اختر كابتن', 400, ErrorCodes.DriverNotFound);
+    }
+    this.normalizeStops(body.stops);
+    const price = Number(body.pricePerSeat);
+    if (!(price > 0)) {
+      throw new AppException('سعر المقعد يجب أن يكون أكبر من صفر', 400, ErrorCodes.PricingNotAvailable);
+    }
+    if (!body.scheduledAt) {
+      throw new AppException('موعد الانطلاق مطلوب', 400, ErrorCodes.InvalidRecurrence);
+    }
+    if (!body.scheduleType && !body.recurrenceKind) {
+      throw new AppException('نوع الجدول مطلوب', 400, ErrorCodes.InvalidRecurrence);
+    }
     const driver = await this.requireDriverById(body.driverId);
-    const created = await this.createRouteForDriver(driver, body);
+    const created = await this.createRouteForDriver(driver, {
+      ...body,
+      vehicleKind: body.vehicleKind?.trim() || captainVehicleKind(driver) || undefined,
+      capacity: undefined,
+    });
     this.logger.log({ event: 'CaptainRouteCreated', routeId: created.id, driverId: driver.id, source: 'admin' });
     if (body.publish) {
       await this.setLifecycle(created.id, 'publish');
     }
-    if (body.scheduledAt != null && body.pricePerSeat != null) {
-      await this.createTripsForDriver(driver, {
-        routeId: created.id,
-        scheduledAt: body.scheduledAt,
-        pricePerSeat: body.pricePerSeat,
-        scheduleType: body.scheduleType,
-        recurrenceKind: body.recurrenceKind,
-        daysOfWeek: body.daysOfWeek,
-        rangeStart: body.rangeStart,
-        rangeEnd: body.rangeEnd,
-      });
-    }
+    await this.createTripsForDriver(driver, {
+      routeId: created.id,
+      scheduledAt: body.scheduledAt,
+      pricePerSeat: price,
+      scheduleType: body.scheduleType,
+      recurrenceKind: body.recurrenceKind,
+      daysOfWeek: body.daysOfWeek,
+      rangeStart: body.rangeStart,
+      rangeEnd: body.rangeEnd,
+    });
     return this.adminGet(created.id);
   }
 
@@ -1433,8 +1519,8 @@ export class CaptainRoutesService {
     stops: Array<{
       id: string;
       name: string;
-      latitude: number;
-      longitude: number;
+      latitude: number | null;
+      longitude: number | null;
       order: number;
       isDeleted: boolean;
     }>;
@@ -1468,8 +1554,7 @@ export class CaptainRoutesService {
       stops: stops.map((stop) => ({
         id: stop.id,
         name: stop.name,
-        latitude: stop.latitude,
-        longitude: stop.longitude,
+        ...publicStopCoords(stop),
         order: stop.order,
       })),
       trips: (route.trips ?? []).map((trip) => ({
@@ -1505,27 +1590,33 @@ export class CaptainRoutesService {
     }
   }
 
-  private normalizeStops(stops: StopInput[] | undefined): StopInput[] {
-    const cleaned = (stops ?? [])
-      .map((stop) => ({
-        name: (stop.name ?? '').trim(),
-        latitude: Number(stop.latitude),
-        longitude: Number(stop.longitude),
-      }))
-      .filter(
-        (stop) =>
-          stop.name.length > 0 &&
-          Number.isFinite(stop.latitude) &&
-          Number.isFinite(stop.longitude),
-      );
-    if (cleaned.length < 2) {
+  private async quoteSnapshot(
+    routeId: string | null,
+    vehicleKind?: string | null,
+    seatPrice?: number | null,
+  ) {
+    const vehicleType = vehicleTypeIdFromKind(vehicleKind);
+    const commissionPercent = await this.fare.platformCommissionPercent(routeId, vehicleType);
+    const priced = seatPrice != null && seatPrice > 0 ? money(seatPrice) : 0;
+    const split = splitEarnings(priced, commissionPercent);
+    return {
+      commissionPercent,
+      commissionRate: split.commissionRate,
+      commissionAmount: split.commissionAmount,
+      captainEarning: split.captainEarnings,
+    };
+  }
+
+  private normalizeStops(stops: StopInput[] | undefined) {
+    try {
+      return normalizeCaptainStops(stops);
+    } catch (err) {
       throw new AppException(
-        'أضف محطتين على الأقل',
+        err instanceof Error ? err.message : 'المحطات غير صالحة',
         400,
         ErrorCodes.InvalidStops,
       );
     }
-    return cleaned;
   }
 
   private resolveCapacity(
@@ -1533,11 +1624,15 @@ export class CaptainRoutesService {
     driver: DriverCapacitySource,
     vehicleKind?: string | null,
   ): number {
-    const fallback = defaultCapacityForVehicleKind(vehicleKind ?? driver.vehicleKind);
-    const value = requested ?? driver.seats ?? driver.vehicle?.capacity ?? fallback;
-    if (!Number.isInteger(value) || value < 1) {
-      throw new AppException('سعة المركبة غير صالحة', 400, ErrorCodes.InvalidSeatCount);
+    const value = driver.seats ?? driver.vehicle?.capacity ?? requested;
+    if (value == null || !Number.isInteger(value) || value < 1) {
+      throw new AppException(
+        'سعة المركبة غير موجودة في بيانات الكابتن. أكمل ملف المركبة أولاً.',
+        400,
+        ErrorCodes.InvalidSeatCount,
+      );
     }
+    void vehicleKind;
     return value;
   }
 

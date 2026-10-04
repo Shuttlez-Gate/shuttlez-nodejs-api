@@ -5,8 +5,8 @@ export const MATCH_RADIUS_METERS = 600;
 export type OrderedStop = {
   id: string;
   order: number;
-  latitude: number;
-  longitude: number;
+  latitude: number | null;
+  longitude: number | null;
   name: string;
 };
 
@@ -76,6 +76,12 @@ export function nearestStop(
   let best: OrderedStop | null = null;
   let bestMeters = Number.POSITIVE_INFINITY;
   for (const stop of stops) {
+    if (stop.latitude == null || stop.longitude == null) {
+      continue;
+    }
+    if (stop.latitude === 0 && stop.longitude === 0) {
+      continue;
+    }
     const meters =
       haversineKm(latitude, longitude, stop.latitude, stop.longitude) * 1000;
     if (meters <= radiusMeters && meters < bestMeters) {

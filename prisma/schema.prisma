@@ -211,8 +211,8 @@ model Stop {
   id                   String                 @id(map: "PK_StopsSet") @map("Id") @db.Uuid
   routeId              String                  @map("RouteId") @db.Uuid
   name                 String                 @map("Name")
-  latitude             Float                  @map("Latitude")
-  longitude            Float                  @map("Longitude")
+  latitude             Float?                 @map("Latitude")
+  longitude            Float?                 @map("Longitude")
   order                Int                    @map("Order")
   createdAt            DateTime               @map("CreatedAt") @db.Timestamptz(6)
   updatedAt            DateTime?             @map("UpdatedAt") @db.Timestamptz(6)

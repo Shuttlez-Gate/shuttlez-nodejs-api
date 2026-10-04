@@ -92,13 +92,17 @@ export class PlacesService {
       .filter((x): x is PlaceSuggestionDto => x != null);
   }
 
-  async details(placeId: string): Promise<{ lat: number; lng: number } | null> {
+  async details(placeId: string): Promise<{
+    lat: number;
+    lng: number;
+    name: string | null;
+  } | null> {
     const id = placeId.trim();
     if (!id) return null;
 
     const params = new URLSearchParams({
       place_id: id,
-      fields: 'geometry',
+      fields: 'geometry,name,formatted_address',
       key: this.apiKey(),
       language: 'ar',
     });
@@ -106,14 +110,58 @@ export class PlacesService {
     const res = await fetch(url);
     const data = (await res.json()) as {
       status?: string;
-      result?: { geometry?: { location?: { lat?: number; lng?: number } } };
+      result?: {
+        name?: string;
+        formatted_address?: string;
+        geometry?: { location?: { lat?: number; lng?: number } };
+      };
     };
     if (data.status && data.status !== 'OK') return null;
     const loc = data.result?.geometry?.location;
     const lat = loc?.lat;
     const lng = loc?.lng;
     if (typeof lat !== 'number' || typeof lng !== 'number') return null;
-    return { lat, lng };
+    return {
+      lat,
+      lng,
+      name: data.result?.name || data.result?.formatted_address || null,
+    };
+  }
+
+  async reverse(lat: number, lng: number): Promise<{
+    lat: number;
+    lng: number;
+    name: string | null;
+  } | null> {
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    const params = new URLSearchParams({
+      latlng: `${lat},${lng}`,
+      key: this.apiKey(),
+      language: 'ar',
+    });
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?${params}`;
+    const res = await fetch(url);
+    const data = (await res.json()) as {
+      status?: string;
+      results?: Array<{
+        formatted_address?: string;
+        address_components?: Array<{ short_name?: string; types?: string[] }>;
+      }>;
+    };
+    if (data.status && data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
+      return { lat, lng, name: null };
+    }
+    const first = data.results?.[0];
+    const neighborhood = first?.address_components?.find((c) =>
+      (c.types ?? []).some((t) =>
+        ['neighborhood', 'sublocality', 'sublocality_level_1', 'locality', 'route'].includes(t),
+      ),
+    )?.short_name;
+    return {
+      lat,
+      lng,
+      name: neighborhood || first?.formatted_address || null,
+    };
   }
 
   async drivingRoute(input: {
@@ -121,6 +169,7 @@ export class PlacesService {
     originLng: number;
     destLat: number;
     destLng: number;
+    waypoints?: Array<{ lat: number; lng: number }>;
   }): Promise<{
     points: Array<{ latitude: number; longitude: number }>;
     durationSeconds: number;
@@ -132,6 +181,12 @@ export class PlacesService {
       mode: 'driving',
       key: this.apiKey(),
     });
+    const waypoints = (input.waypoints ?? []).filter(
+      (point) => Number.isFinite(point.lat) && Number.isFinite(point.lng),
+    );
+    if (waypoints.length > 0) {
+      params.set('waypoints', waypoints.map((point) => `${point.lat},${point.lng}`).join('|'));
+    }
     const res = await fetch(
       `https://maps.googleapis.com/maps/api/directions/json?${params}`,
     );

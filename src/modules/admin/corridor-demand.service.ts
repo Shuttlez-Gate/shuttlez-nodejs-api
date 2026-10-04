@@ -417,13 +417,20 @@ function buildPolyline(route: {
   startLongitude: number;
   endLatitude: number;
   endLongitude: number;
-  stops: Array<{ latitude: number; longitude: number }>;
+  stops: Array<{ latitude?: number | null; longitude?: number | null }>;
 }): LatLng[] {
   const decoded = decodePolyline(route.encodedPolyline);
   if (decoded.length >= 2) return decoded;
   return [
     { lat: route.startLatitude, lng: route.startLongitude },
-    ...route.stops.map((s) => ({ lat: s.latitude, lng: s.longitude })),
+    ...route.stops
+      .filter(
+        (s) =>
+          s.latitude != null &&
+          s.longitude != null &&
+          !(s.latitude === 0 && s.longitude === 0),
+      )
+      .map((s) => ({ lat: s.latitude as number, lng: s.longitude as number })),
     { lat: route.endLatitude, lng: route.endLongitude },
   ];
 }
