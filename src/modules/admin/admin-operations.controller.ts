@@ -20,7 +20,7 @@ import { CaptainRoutesService } from '../marketplace/captain-routes.service';
 import { pageRequestFrom, PagedResult } from '../../common/paged-result';
 import { AppException, NotFoundException } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/error-codes';
-import { TripStatus, BookingStatus } from '../../common/enums';
+import { TripStatus, BookingStatus, RouteOwnerType } from '../../common/enums';
 import { newId, utcNow } from '../../common/utils/date.util';
 import { baseFields } from '../../common/utils/entity-defaults';
 import { money, refCode } from '../../common/utils/money';
@@ -80,7 +80,7 @@ export class AdminRoutesController {
         : {}),
       ...(ownerType != null && ownerType !== ''
         ? { ownerType: Number(ownerType) }
-        : {}),
+        : { ownerType: RouteOwnerType.Platform }),
       ...(search
         ? {
             OR: [
@@ -1217,7 +1217,9 @@ function mapTripFinance(
 function mapTripCore(t: {
   id: string;
   routeId: string;
-  route: { name: string; vehicleKind?: string | null };
+  parentTripId?: string | null;
+  recurrenceKind?: number | null;
+  route: { name: string; vehicleKind?: string | null; ownerType?: number | null };
   driverId: string | null;
   driver: { user: { fullName: string | null } } | null;
   status: number;
@@ -1237,9 +1239,13 @@ function mapTripCore(t: {
   }>;
 }) {
   const finance = mapTripFinance(t.bookings, t.availableSeats);
+  const ownerType = t.route.ownerType ?? 0;
   return {
     id: t.id,
     routeId: t.routeId,
+    captainRouteId: ownerType === 1 ? t.routeId : null,
+    parentTripId: t.parentTripId ?? null,
+    recurrenceKind: t.recurrenceKind ?? null,
     routeName: t.route.name,
     vehicleKind: t.route.vehicleKind ?? null,
     driverId: t.driverId,

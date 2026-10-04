@@ -96,6 +96,12 @@ export class SupportChatGateway {
   }
 }
 
+function typingRecord(body: unknown): Record<string, unknown> {
+  if (Array.isArray(body)) return typingRecord(body[0]);
+  if (body && typeof body === 'object') return body as Record<string, unknown>;
+  return {};
+}
+
 function isHubUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
     value,
@@ -105,6 +111,15 @@ function isHubUuid(value: string): boolean {
 export type GroupUpdatedPayload = {
   id: string;
   organizerUserId: string;
+};
+
+export type GroupChatPayload = {
+  id: string;
+  groupId: string;
+  senderUserId: string;
+  recipientUserId: string;
+  body: string;
+  createdAt: Date;
 };
 
 @WebSocketGateway({
@@ -168,6 +183,68 @@ export class GroupGateway {
       .to(`group-${group.id}`)
       .to(`user-${group.organizerUserId}`)
       .emit('GroupUpdated', group);
+  }
+
+  publishChat(message: GroupChatPayload) {
+    if (!message.groupId || !this.server) return;
+    this.server
+      .to(`user-${message.senderUserId}`)
+      .to(`user-${message.recipientUserId}`)
+      .emit('GroupChatMessage', message);
+  }
+
+  publishChatRead(payload: { groupId: string; readerUserId: string; peerUserId: string }) {
+    if (!payload.groupId || !this.server) return;
+    this.server.to(`user-${payload.readerUserId}`).emit('GroupChatRead', payload);
+  }
+
+  publishTyping(payload: {
+    groupId: string;
+    senderUserId: string;
+    peerUserId: string;
+    typing: boolean;
+  }) {
+    if (!payload.groupId || !this.server) return;
+    this.server
+      .to(`user-${payload.peerUserId}`)
+      .to(`group-${payload.groupId}`)
+      .emit('GroupChatTyping', {
+        groupId: payload.groupId,
+        senderUserId: payload.senderUserId,
+        typing: payload.typing,
+      });
+  }
+
+  @SubscribeMessage('GroupChatTyping')
+  async typing(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body?: unknown,
+  ) {
+    const userId = await this.userId(client);
+    const record = typingRecord(body);
+    const groupId = String(record.groupId ?? '').trim();
+    const peerUserId = String(record.peerUserId ?? '').trim();
+    const typing = record.typing === true || record.typing === 'true';
+    if (!userId || !isHubUuid(groupId) || !isHubUuid(peerUserId) || peerUserId === userId) {
+      return;
+    }
+    const [member, peer] = await Promise.all([
+      this.prisma.groupMember.findFirst({
+        where: { groupRequestId: groupId, userId, isDeleted: false },
+        select: { id: true },
+      }),
+      this.prisma.groupMember.findFirst({
+        where: { groupRequestId: groupId, userId: peerUserId, isDeleted: false },
+        select: { id: true },
+      }),
+    ]);
+    if (!member || !peer) return;
+    this.publishTyping({
+      groupId,
+      senderUserId: userId,
+      peerUserId,
+      typing,
+    });
   }
 
   private async userId(client: Socket): Promise<string> {

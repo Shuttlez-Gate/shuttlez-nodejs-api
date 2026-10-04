@@ -57,8 +57,35 @@ export class GroupsController {
   }
 
   @Post(':groupId/join')
-  async join(@Param('groupId') groupId: string) {
-    return ApiResponse.ok(await this.groups.join(groupId), 'تم الانضمام للمجموعة');
+  async join(
+    @Param('groupId') groupId: string,
+    @Body()
+    body?: {
+      pickupLatitude?: number;
+      pickupLongitude?: number;
+      pickupAddress?: string;
+    },
+  ) {
+    return ApiResponse.ok(
+      await this.groups.join(groupId, body),
+      'تم الانضمام للمجموعة',
+    );
+  }
+
+  @Post(':groupId/pickup')
+  async pickup(
+    @Param('groupId') groupId: string,
+    @Body()
+    body?: {
+      pickupLatitude?: number;
+      pickupLongitude?: number;
+      pickupAddress?: string;
+    },
+  ) {
+    return ApiResponse.ok(
+      await this.groups.setPickup(groupId, body),
+      'تم حفظ نقطة الانطلاق',
+    );
   }
 
   @Post(':groupId/leave')
@@ -85,6 +112,61 @@ export class GroupsController {
   @Get('invite/:code')
   async invite(@Param('code') code: string) {
     return ApiResponse.ok(await this.groups.invite(code));
+  }
+
+  @Get(':groupId/messages/unread')
+  async unread(@Param('groupId') groupId: string) {
+    return ApiResponse.ok(await this.groups.unreadMemberMessages(groupId));
+  }
+
+  @Get(':groupId/messages/typing')
+  async typingPeers(@Param('groupId') groupId: string) {
+    return ApiResponse.ok(await this.groups.memberTypingPeers(groupId));
+  }
+
+  @Post(':groupId/messages/typing')
+  async typing(
+    @Param('groupId') groupId: string,
+    @Body() body?: { peerUserId?: string; typing?: boolean },
+  ) {
+    return ApiResponse.ok(
+      await this.groups.notifyMemberTyping(
+        groupId,
+        body?.peerUserId ?? '',
+        body?.typing === true,
+      ),
+    );
+  }
+
+  @Post(':groupId/messages/read')
+  async markRead(
+    @Param('groupId') groupId: string,
+    @Body() body?: { peerUserId?: string },
+  ) {
+    return ApiResponse.ok(
+      await this.groups.markMemberMessagesRead(groupId, body?.peerUserId ?? ''),
+    );
+  }
+
+  @Get(':groupId/messages')
+  async messages(
+    @Param('groupId') groupId: string,
+    @Query('peerUserId') peerUserId?: string,
+  ) {
+    return ApiResponse.ok(
+      await this.groups.listMemberMessages(groupId, peerUserId ?? ''),
+    );
+  }
+
+  @Post(':groupId/messages')
+  async sendMessage(
+    @Param('groupId') groupId: string,
+    @Body() body?: { peerUserId?: string; body?: string },
+  ) {
+    return ApiResponse.ok(
+      await this.groups.sendMemberMessage(groupId, body),
+      'تم إرسال الرسالة',
+    );
   }
 
   @Get(':groupId')

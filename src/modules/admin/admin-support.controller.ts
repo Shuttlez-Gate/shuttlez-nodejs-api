@@ -482,7 +482,10 @@ export class AdminGroupsController {
         updatedAt: utcNow(),
       },
     });
-    return ApiResponse.ok(await this.groups.mapGroup(await this.loadGroup(groupId)), 'تم تعيين الكابتن');
+    return ApiResponse.ok(
+      await this.groups.publishGroup(groupId),
+      'تم تعيين الكابتن',
+    );
   }
 
   @Delete(':groupId/driver')
@@ -503,24 +506,11 @@ export class AdminGroupsController {
       },
     });
     return ApiResponse.ok(
-      await this.groups.mapGroup(await this.loadGroup(groupId)),
+      await this.groups.publishGroup(groupId),
       'تم إلغاء تعيين الكابتن',
     );
   }
 
-  private async loadGroup(id: string) {
-    const group = await this.prisma.groupRequest.findFirst({
-      where: { id },
-      include: {
-        driver: { include: { user: true } },
-        members: { include: { user: true } },
-      },
-    });
-    if (!group) {
-      throw new NotFoundException('المجموعة غير موجودة', ErrorCodes.GroupNotFound);
-    }
-    return group;
-  }
 }
 
 @ApiTags('admin-dashboard')

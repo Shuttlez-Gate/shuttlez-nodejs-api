@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma/prisma.service';
@@ -21,6 +21,12 @@ import {
 import { baseFields } from '../../common/utils/entity-defaults';
 import { newId, utcNow } from '../../common/utils/date.util';
 import { money, refCode } from '../../common/utils/money';
+import { pageRequestFrom, PagedResult } from '../../common/paged-result';
+import {
+  captainVehicleKind,
+  defaultCapacityForVehicleKind,
+  vehicleKindsCompatible,
+} from '../../common/utils/enums-map';
 import { SegmentInventoryService } from './segment-inventory.service';
 import { PushNotificationService } from './push-notification.service';
 import {
@@ -29,11 +35,16 @@ import {
   type OrderedStop,
 } from './segment-occupancy';
 import {
+  daysForScheduleType,
   daysOfWeekCsv,
   occurrenceDates,
-  parseDaysOfWeek,
   parseRecurrenceKind,
 } from './recurrence';
+import {
+  captainRouteLifecycle,
+  isRecurringKind,
+  tripTimeBucket,
+} from './captain-route-status';
 import { randomBytes } from 'crypto';
 
 type StopInput = {
@@ -42,8 +53,40 @@ type StopInput = {
   longitude: number;
 };
 
+type DriverCapacitySource = {
+  id: string;
+  seats: number | null;
+  vehicleKind: string | null;
+  vehicle: { capacity: number; type?: number | null } | null;
+};
+
+type CreateTripsBody = {
+  routeId: string;
+  scheduledAt: string;
+  pricePerSeat: number;
+  recurrenceKind?: string;
+  scheduleType?: string;
+  daysOfWeek?: number[] | string;
+  rangeStart?: string;
+  rangeEnd?: string;
+  availableSeats?: number;
+};
+
+export type PassengerSearchQuery = {
+  fromLatitude?: number | null;
+  fromLongitude?: number | null;
+  toLatitude?: number | null;
+  toLongitude?: number | null;
+  date?: string | null;
+  time?: string | null;
+  passengers?: number | null;
+  vehicleKind?: string | null;
+};
+
 @Injectable()
 export class CaptainRoutesService {
+  private readonly logger = new Logger(CaptainRoutesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
@@ -82,61 +125,8 @@ export class CaptainRoutesService {
   }
 
   /** Published captain routes for the rider Captain Routes screen. */
-  async listPublishedForRiders() {
-    const routes = await this.prisma.route.findMany({
-      where: {
-        isDeleted: false,
-        isActive: true,
-        ownerType: RouteOwnerType.Captain,
-        publishStatus: RoutePublishStatus.Published,
-        shareToken: { not: null },
-      },
-      include: {
-        stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
-        trips: {
-          where: {
-            isDeleted: false,
-            status: { in: [TripStatus.Scheduled, TripStatus.DriverAssigned] },
-            scheduledAt: { gte: utcNow() },
-          },
-          include: { segmentInventories: { where: { isDeleted: false } } },
-          orderBy: { scheduledAt: 'asc' },
-          take: 5,
-        },
-      },
-      orderBy: { updatedAt: 'desc' },
-      take: 50,
-    });
-
-    return routes.map((route) => {
-      const stops = route.stops
-        .filter((s) => !s.isDeleted)
-        .sort((a, b) => a.order - b.order);
-      const nextTrip = route.trips[0];
-      const remainingSeats = nextTrip
-        ? remainingForRange(
-            nextTrip.segmentInventories,
-            stopsMin(stops),
-            stopsMax(stops),
-          )
-        : 0;
-      return {
-        id: route.id,
-        name: route.name,
-        description: route.description,
-        vehicleKind: route.vehicleKind,
-        capacity: route.capacity,
-        shareToken: route.shareToken,
-        badgeVariant: 'captain' as const,
-        stopsCount: stops.length,
-        fromStop: stops[0]?.name ?? route.name,
-        toStop: stops[stops.length - 1]?.name ?? route.name,
-        remainingSeats,
-        nextTripAt: nextTrip?.scheduledAt ?? null,
-        pricePerSeat: nextTrip ? money(nextTrip.pricePerSeat) : null,
-        hasAvailableSeats: remainingSeats > 0,
-      };
-    });
+  async listPublishedForRiders(query: PassengerSearchQuery = {}) {
+    return this.searchPublished(query);
   }
 
   async createRoute(body: {
@@ -147,10 +137,26 @@ export class CaptainRoutesService {
     stops: StopInput[];
   }) {
     const driver = await this.requireVerifiedDriver();
+    const created = await this.createRouteForDriver(driver, body);
+    this.logger.log({ event: 'CaptainRouteCreated', routeId: created.id, driverId: driver.id });
+    return created;
+  }
+
+  async createRouteForDriver(
+    driver: DriverCapacitySource,
+    body: {
+      name?: string;
+      description?: string;
+      vehicleKind?: string;
+      capacity?: number;
+      stops: StopInput[];
+    },
+  ) {
     const stops = this.normalizeStops(body.stops);
     const first = stops[0];
     const last = stops[stops.length - 1];
-    const capacity = this.resolveCapacity(body.capacity, driver);
+    const vehicleKind = body.vehicleKind ?? captainVehicleKind(driver);
+    const capacity = this.resolveCapacity(body.capacity, driver, vehicleKind);
     const created = await this.prisma.route.create({
       data: {
         id: newId(),
@@ -165,7 +171,7 @@ export class CaptainRoutesService {
         ownerDriverId: driver.id,
         publishStatus: RoutePublishStatus.Draft,
         shareToken: this.newShareToken(),
-        vehicleKind: body.vehicleKind ?? driver.vehicleKind,
+        vehicleKind,
         capacity,
         stops: {
           create: stops.map((stop, index) => ({
@@ -196,14 +202,15 @@ export class CaptainRoutesService {
       capacity?: number;
       stops?: StopInput[];
     },
+    driverOverride?: DriverCapacitySource,
   ) {
-    const driver = await this.requireVerifiedDriver();
+    const driver = driverOverride ?? (await this.requireVerifiedDriver());
     const route = await this.requireOwnedRoute(id, driver.id);
     await this.assertNoActiveBookings(route.id);
     const nextStops = body.stops ? this.normalizeStops(body.stops) : null;
     const first = nextStops?.[0];
     const last = nextStops?.[nextStops.length - 1];
-    const capacity = body.capacity ?? route.capacity ?? this.resolveCapacity(undefined, driver);
+    const capacity = body.capacity ?? route.capacity ?? this.resolveCapacity(undefined, driver, body.vehicleKind ?? route.vehicleKind);
 
     await this.prisma.$transaction(async (tx) => {
       await tx.route.update({
@@ -291,6 +298,7 @@ export class CaptainRoutesService {
       },
     });
     await this.notifyMatchingDemand(updated);
+    this.logger.log({ event: 'CaptainRouteActivated', routeId: updated.id, driverId: driver.id });
     return this.mapRoute(updated);
   }
 
@@ -313,17 +321,19 @@ export class CaptainRoutesService {
     };
   }
 
-  async createTrips(body: {
-    routeId: string;
-    scheduledAt: string;
-    pricePerSeat: number;
-    recurrenceKind?: string;
-    daysOfWeek?: number[] | string;
-    rangeStart?: string;
-    rangeEnd?: string;
-    availableSeats?: number;
-  }) {
+  async createTrips(body: CreateTripsBody) {
     const driver = await this.requireVerifiedDriver();
+    const result = await this.createTripsForDriver(driver, body);
+    this.logger.log({
+      event: 'CaptainRouteScheduleChanged',
+      routeId: result.routeId,
+      driverId: driver.id,
+      count: result.count,
+    });
+    return result;
+  }
+
+  async createTripsForDriver(driver: DriverCapacitySource, body: CreateTripsBody) {
     const route = await this.requireOwnedRoute(body.routeId, driver.id);
     const stops = route.stops
       .filter((s) => !s.isDeleted)
@@ -339,8 +349,8 @@ export class CaptainRoutesService {
     if (Number.isNaN(scheduledAt.getTime())) {
       throw new AppException('موعد الرحلة غير صالح', 400, ErrorCodes.InvalidRecurrence);
     }
-    const kind = parseRecurrenceKind(body.recurrenceKind);
-    const days = parseDaysOfWeek(body.daysOfWeek);
+    const kind = parseRecurrenceKind(body.recurrenceKind ?? body.scheduleType);
+    const days = daysForScheduleType(body.scheduleType ?? body.recurrenceKind, body.daysOfWeek);
     const rangeStart = body.rangeStart ? new Date(body.rangeStart) : null;
     const rangeEnd = body.rangeEnd ? new Date(body.rangeEnd) : null;
     const dates = occurrenceDates({
@@ -351,7 +361,7 @@ export class CaptainRoutesService {
       rangeEnd,
     });
     const capacity =
-      body.availableSeats ?? route.capacity ?? this.resolveCapacity(undefined, driver);
+      body.availableSeats ?? route.capacity ?? this.resolveCapacity(undefined, driver, route.vehicleKind);
     const price = Number(body.pricePerSeat);
     if (!(price >= 0)) {
       throw new AppException('السعر غير صالح', 400, ErrorCodes.PricingNotAvailable);
@@ -660,6 +670,716 @@ export class CaptainRoutesService {
     };
   }
 
+  async searchPublished(query: PassengerSearchQuery = {}) {
+    const now = utcNow();
+    const passengers = query.passengers && query.passengers > 0 ? query.passengers : 1;
+    const hasCoords =
+      query.fromLatitude != null &&
+      query.fromLongitude != null &&
+      query.toLatitude != null &&
+      query.toLongitude != null;
+    const dateKey = query.date?.trim() || null;
+    const time = query.time?.trim() || null;
+
+    const routes = await this.prisma.route.findMany({
+      where: {
+        isDeleted: false,
+        isActive: true,
+        ownerType: RouteOwnerType.Captain,
+        publishStatus: RoutePublishStatus.Published,
+      },
+      include: {
+        stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
+        ownerDriver: { include: { user: true, vehicle: true } },
+        trips: {
+          where: {
+            isDeleted: false,
+            status: { in: [TripStatus.Scheduled, TripStatus.DriverAssigned] },
+            scheduledAt: { gte: now },
+          },
+          include: { segmentInventories: { where: { isDeleted: false } } },
+          orderBy: { scheduledAt: 'asc' },
+          take: 20,
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 80,
+    });
+
+    const results = [];
+    for (const route of routes) {
+      const stops = route.stops
+        .filter((s) => !s.isDeleted)
+        .sort((a, b) => a.order - b.order);
+      if (stops.length < 2) continue;
+      if (!vehicleKindsCompatible(query.vehicleKind, route.vehicleKind ?? (route.ownerDriver ? captainVehicleKind(route.ownerDriver) : null))) {
+        continue;
+      }
+
+      let origin: { id: string; name: string; order: number } = stops[0];
+      let destination: { id: string; name: string; order: number } = stops[stops.length - 1];
+      if (hasCoords) {
+        const match = matchOriginDestination(
+          stops,
+          query.fromLatitude!,
+          query.fromLongitude!,
+          query.toLatitude!,
+          query.toLongitude!,
+        );
+        if (!match) continue;
+        origin = match.origin;
+        destination = match.destination;
+      }
+
+      const matchingTrips = route.trips.filter((trip) => {
+        if (dateKey && cairoDateKey(trip.scheduledAt) !== dateKey) return false;
+        if (time) {
+          const hm = `${String(trip.scheduledAt.getUTCHours()).padStart(2, '0')}:${String(
+            trip.scheduledAt.getUTCMinutes(),
+          ).padStart(2, '0')}`;
+          if (hm !== time) return false;
+        }
+        const remaining = remainingForRange(
+          trip.segmentInventories,
+          origin.order,
+          destination.order,
+        );
+        return remaining >= passengers;
+      });
+      if (dateKey && matchingTrips.length === 0) continue;
+      const nextTrip = matchingTrips[0] ?? route.trips[0] ?? null;
+      const remainingSeats = nextTrip
+        ? remainingForRange(nextTrip.segmentInventories, origin.order, destination.order)
+        : 0;
+      if (hasCoords && remainingSeats < passengers) continue;
+
+      const driver = route.ownerDriver;
+      const ratingCount = driver?.ratingCount ?? 0;
+      results.push({
+        id: route.id,
+        captainRouteId: route.id,
+        name: route.name,
+        description: route.description,
+        vehicleKind: route.vehicleKind ?? (driver ? captainVehicleKind(driver) : null),
+        vehicle: {
+          id: driver?.vehicleId ?? null,
+          type: route.vehicleKind ?? (driver ? captainVehicleKind(driver) : null),
+          plateNumber: driver?.plateNumber ?? driver?.vehicle?.plateNumber ?? null,
+          capacity: route.capacity ?? driver?.seats ?? driver?.vehicle?.capacity ?? null,
+        },
+        capacity: route.capacity,
+        shareToken: route.shareToken,
+        badgeVariant: 'captain' as const,
+        status: captainRouteLifecycle({
+          publishStatus: route.publishStatus,
+          isActive: route.isActive,
+          nextTripAt: nextTrip?.scheduledAt ?? null,
+          now,
+        }),
+        stops: stops.map((stop) => ({
+          id: stop.id,
+          name: stop.name,
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+          order: stop.order,
+        })),
+        stopsCount: stops.length,
+        origin: origin.name,
+        destination: destination.name,
+        fromStop: origin.name,
+        toStop: destination.name,
+        originStopId: origin.id,
+        destinationStopId: destination.id,
+        remainingSeats,
+        availableSeats: remainingSeats,
+        nextTripAt: nextTrip?.scheduledAt ?? null,
+        departureTime: nextTrip?.scheduledAt ?? null,
+        pricePerSeat: nextTrip ? money(nextTrip.pricePerSeat) : null,
+        hasAvailableSeats: remainingSeats > 0,
+        captain: driver
+          ? {
+              id: driver.id,
+              name: driver.user.fullName,
+              photoUrl: driver.user.avatarUrl,
+              phone: driver.user.phone,
+              isActive: driver.isActive,
+            }
+          : null,
+        captainName: driver?.user.fullName ?? null,
+        captainPhotoUrl: driver?.user.avatarUrl ?? null,
+        captainRatingAverage:
+          ratingCount > 0 && driver ? money(driver.ratingAverage) : null,
+        captainRatingCount: ratingCount,
+        recurrenceKind: nextTrip?.recurrenceKind ?? null,
+        recurrenceDays: nextTrip?.recurrenceDaysOfWeek ?? null,
+      });
+    }
+    return results;
+  }
+
+  async adminList(query: {
+    search?: string;
+    driverId?: string;
+    vehicleKind?: string;
+    status?: string;
+    scheduleType?: string;
+    date?: string;
+    origin?: string;
+    destination?: string;
+    page?: string | number;
+    pageSize?: string | number;
+  }) {
+    const paging = pageRequestFrom(Number(query.page), Number(query.pageSize));
+    const now = utcNow();
+    const where: Prisma.RouteWhereInput = {
+      isDeleted: false,
+      ownerType: RouteOwnerType.Captain,
+      ...(query.driverId ? { ownerDriverId: query.driverId } : {}),
+      ...(query.search
+        ? {
+            OR: [
+              { name: { contains: query.search } },
+              { description: { contains: query.search } },
+              { ownerDriver: { user: { fullName: { contains: query.search } } } },
+              { ownerDriver: { user: { phone: { contains: query.search } } } },
+            ],
+          }
+        : {}),
+      ...(query.origin || query.destination
+        ? {
+            stops: {
+              some: {
+                isDeleted: false,
+                OR: [
+                  ...(query.origin ? [{ name: { contains: query.origin } }] : []),
+                  ...(query.destination ? [{ name: { contains: query.destination } }] : []),
+                ],
+              },
+            },
+          }
+        : {}),
+    };
+
+    const rows = await this.prisma.route.findMany({
+      where,
+      include: {
+        stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
+        ownerDriver: { include: { user: true, vehicle: true } },
+        trips: {
+          where: { isDeleted: false },
+          include: { segmentInventories: { where: { isDeleted: false } } },
+          orderBy: { scheduledAt: 'asc' },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const mapped = rows
+      .map((route) => this.mapAdminListRow(route, now))
+      .filter((row) => {
+        if (query.status && row.status !== query.status) return false;
+        if (query.vehicleKind && !vehicleKindsCompatible(query.vehicleKind, row.vehicleKind)) {
+          return false;
+        }
+        if (query.scheduleType === 'once' && row.scheduleType !== 'once') return false;
+        if (
+          (query.scheduleType === 'recurring' ||
+            query.scheduleType === 'daily' ||
+            query.scheduleType === 'weekly') &&
+          row.scheduleType === 'once'
+        ) {
+          return false;
+        }
+        if (query.date && !row.tripDates.includes(query.date)) return false;
+        return true;
+      });
+
+    const totalCount = mapped.length;
+    const items = mapped.slice(paging.skip, paging.skip + paging.pageSize);
+    return new PagedResult(items, paging.page, paging.pageSize, totalCount);
+  }
+
+  async adminSummary() {
+    const now = utcNow();
+    const routes = await this.prisma.route.findMany({
+      where: { isDeleted: false, ownerType: RouteOwnerType.Captain },
+      include: {
+        ownerDriver: true,
+        trips: {
+          where: {
+            isDeleted: false,
+            status: { in: [TripStatus.Scheduled, TripStatus.DriverAssigned] },
+            scheduledAt: { gte: now },
+          },
+          include: { segmentInventories: { where: { isDeleted: false } } },
+          orderBy: { scheduledAt: 'asc' },
+          take: 1,
+        },
+        stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
+      },
+    });
+    let active = 0;
+    let oneTime = 0;
+    let recurring = 0;
+    let withoutCaptain = 0;
+    let withoutVehicle = 0;
+    let fullyBooked = 0;
+    let availableSeats = 0;
+    for (const route of routes) {
+      const next = route.trips[0];
+      const status = captainRouteLifecycle({
+        publishStatus: route.publishStatus,
+        isActive: route.isActive,
+        nextTripAt: next?.scheduledAt ?? null,
+        now,
+      });
+      if (status === 'active') active += 1;
+      if (!route.ownerDriverId) withoutCaptain += 1;
+      if (!route.vehicleKind && !route.ownerDriver?.vehicleKind && !route.ownerDriver?.vehicleId) {
+        withoutVehicle += 1;
+      }
+      const kind = next?.recurrenceKind ?? RecurrenceKind.Once;
+      if (isRecurringKind(kind)) recurring += 1;
+      else oneTime += 1;
+      if (next) {
+        const remaining = remainingForRange(
+          next.segmentInventories,
+          stopsMin(route.stops),
+          stopsMax(route.stops),
+        );
+        availableSeats += Math.max(0, remaining);
+        if (remaining <= 0) fullyBooked += 1;
+      }
+    }
+    const upcomingCaptainTrips = await this.prisma.trip.count({
+      where: {
+        isDeleted: false,
+        scheduledAt: { gte: now },
+        status: { in: [TripStatus.Scheduled, TripStatus.DriverAssigned, TripStatus.InProgress] },
+        route: { isDeleted: false, ownerType: RouteOwnerType.Captain },
+      },
+    });
+    return {
+      activeCaptainRoutes: active,
+      oneTimeRoutes: oneTime,
+      recurringRoutes: recurring,
+      routesWithoutCaptain: withoutCaptain,
+      routesWithoutVehicle: withoutVehicle,
+      upcomingCaptainTrips,
+      fullyBookedRoutes: fullyBooked,
+      availableSeats,
+    };
+  }
+
+  async adminGet(id: string) {
+    const route = await this.requireCaptainRoute(id);
+    const now = utcNow();
+    const driver = route.ownerDriver;
+    const stops = route.stops.filter((s) => !s.isDeleted).sort((a, b) => a.order - b.order);
+    const trips = route.trips.map((trip) => {
+      const remaining = remainingForRange(
+        trip.segmentInventories,
+        stopsMin(stops),
+        stopsMax(stops),
+      );
+      const reserved = Math.max(0, (trip.segmentInventories[0]?.capacity ?? trip.availableSeats) - remaining);
+      return {
+        id: trip.id,
+        captainRouteId: route.id,
+        routeId: route.id,
+        driverId: trip.driverId,
+        status: trip.status,
+        scheduledAt: trip.scheduledAt,
+        startedAt: trip.startedAt,
+        completedAt: trip.completedAt,
+        pricePerSeat: money(trip.pricePerSeat),
+        availableSeats: remaining,
+        reservedSeats: reserved,
+        capacity: trip.segmentInventories[0]?.capacity ?? route.capacity ?? trip.availableSeats,
+        vehicleKind: route.vehicleKind,
+        recurrenceKind: trip.recurrenceKind,
+        recurrenceDaysOfWeek: trip.recurrenceDaysOfWeek,
+        parentTripId: trip.parentTripId,
+        bucket: tripTimeBucket(trip, now),
+      };
+    });
+    const nextTrip = trips.find((t) => t.bucket === 'upcoming') ?? trips.find((t) => t.bucket === 'current');
+    return {
+      route: {
+        id: route.id,
+        name: route.name,
+        description: route.description,
+        origin: stops[0]?.name ?? null,
+        destination: stops[stops.length - 1]?.name ?? null,
+        stops: stops.map((stop) => ({
+          id: stop.id,
+          name: stop.name,
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+          order: stop.order,
+        })),
+        vehicleKind: route.vehicleKind,
+        capacity: route.capacity,
+        publishStatus: route.publishStatus,
+        isActive: route.isActive,
+        status: captainRouteLifecycle({
+          publishStatus: route.publishStatus,
+          isActive: route.isActive,
+          nextTripAt: nextTrip?.scheduledAt ?? null,
+          now,
+        }),
+        shareToken: route.shareToken,
+        createdAt: route.createdAt,
+      },
+      captain: driver
+        ? {
+            id: driver.id,
+            name: driver.user.fullName,
+            phone: driver.user.phone,
+            photoUrl: driver.user.avatarUrl,
+            isActive: driver.isActive,
+            isOnline: driver.isOnline,
+            vehicleKind: captainVehicleKind(driver),
+            plateNumber: driver.plateNumber ?? driver.vehicle?.plateNumber ?? null,
+            seats: driver.seats ?? driver.vehicle?.capacity ?? null,
+          }
+        : null,
+      vehicle: {
+        id: driver?.vehicleId ?? null,
+        type: route.vehicleKind ?? captainVehicleKind(driver),
+        plateNumber: driver?.plateNumber ?? driver?.vehicle?.plateNumber ?? null,
+        capacity: route.capacity ?? driver?.seats ?? driver?.vehicle?.capacity ?? null,
+        model: driver?.vehicleModelName ?? driver?.vehicle?.model ?? null,
+      },
+      pricing: {
+        pricePerSeat: nextTrip?.pricePerSeat ?? null,
+        basis: 'trip.pricePerSeat',
+      },
+      schedule: {
+        type: scheduleLabel(nextTrip?.recurrenceKind),
+        departureTime: nextTrip?.scheduledAt ?? null,
+        operatingDays: nextTrip?.recurrenceDaysOfWeek ?? null,
+        startDate: route.trips[0]?.recurrenceStartDate ?? null,
+        endDate: route.trips[0]?.recurrenceEndDate ?? null,
+      },
+      availability: {
+        capacity: route.capacity,
+        reserved: nextTrip?.reservedSeats ?? 0,
+        available: nextTrip?.availableSeats ?? 0,
+      },
+      trips: {
+        current: trips.filter((t) => t.bucket === 'current'),
+        upcoming: trips.filter((t) => t.bucket === 'upcoming'),
+        past: trips.filter((t) => t.bucket === 'past'),
+      },
+    };
+  }
+
+  async adminCreate(body: {
+    driverId: string;
+    name?: string;
+    description?: string;
+    vehicleKind?: string;
+    capacity?: number;
+    stops: StopInput[];
+    publish?: boolean;
+    pricePerSeat?: number;
+    scheduledAt?: string;
+    scheduleType?: string;
+    recurrenceKind?: string;
+    daysOfWeek?: number[] | string;
+    rangeStart?: string;
+    rangeEnd?: string;
+  }) {
+    const driver = await this.requireDriverById(body.driverId);
+    const created = await this.createRouteForDriver(driver, body);
+    this.logger.log({ event: 'CaptainRouteCreated', routeId: created.id, driverId: driver.id, source: 'admin' });
+    if (body.publish) {
+      await this.setLifecycle(created.id, 'publish');
+    }
+    if (body.scheduledAt != null && body.pricePerSeat != null) {
+      await this.createTripsForDriver(driver, {
+        routeId: created.id,
+        scheduledAt: body.scheduledAt,
+        pricePerSeat: body.pricePerSeat,
+        scheduleType: body.scheduleType,
+        recurrenceKind: body.recurrenceKind,
+        daysOfWeek: body.daysOfWeek,
+        rangeStart: body.rangeStart,
+        rangeEnd: body.rangeEnd,
+      });
+    }
+    return this.adminGet(created.id);
+  }
+
+  async adminUpdate(
+    id: string,
+    body: {
+      driverId?: string;
+      name?: string;
+      description?: string;
+      vehicleKind?: string;
+      capacity?: number;
+      stops?: StopInput[];
+    },
+  ) {
+    const route = await this.requireCaptainRoute(id);
+    if (body.stops || body.vehicleKind !== undefined || body.capacity !== undefined) {
+      await this.assertNoActiveBookings(route.id);
+    }
+    const nextDriver =
+      body.driverId && body.driverId !== route.ownerDriverId
+        ? await this.requireDriverById(body.driverId)
+        : null;
+    if (nextDriver) {
+      this.logger.log({
+        event: 'CaptainChanged',
+        routeId: route.id,
+        from: route.ownerDriverId,
+        to: nextDriver.id,
+      });
+    }
+    if (body.vehicleKind && body.vehicleKind !== route.vehicleKind) {
+      this.logger.log({
+        event: 'VehicleChanged',
+        routeId: route.id,
+        from: route.vehicleKind,
+        to: body.vehicleKind,
+      });
+    }
+    const driver = nextDriver ?? route.ownerDriver;
+    if (!driver) {
+      throw new AppException('الكابتن غير موجود', 400, ErrorCodes.DriverNotFound);
+    }
+    await this.updateRoute(
+      route.id,
+      {
+        name: body.name,
+        description: body.description,
+        vehicleKind: body.vehicleKind,
+        capacity: body.capacity,
+        stops: body.stops,
+      },
+      driver,
+    );
+    if (nextDriver) {
+      await this.prisma.route.update({
+        where: { id: route.id },
+        data: { ownerDriverId: nextDriver.id, updatedAt: utcNow() },
+      });
+      await this.prisma.trip.updateMany({
+        where: {
+          routeId: route.id,
+          isDeleted: false,
+          status: { in: [TripStatus.Scheduled, TripStatus.DriverAssigned] },
+        },
+        data: { driverId: nextDriver.id, updatedAt: utcNow() },
+      });
+    }
+    this.logger.log({ event: 'CaptainRouteUpdated', routeId: route.id });
+    return this.adminGet(id);
+  }
+
+  async setLifecycle(id: string, action: 'publish' | 'pause' | 'archive' | 'draft') {
+    const route = await this.requireCaptainRoute(id);
+    const next =
+      action === 'publish'
+        ? { publishStatus: RoutePublishStatus.Published, isActive: true }
+        : action === 'pause'
+          ? { publishStatus: RoutePublishStatus.Published, isActive: false }
+          : action === 'draft'
+            ? { publishStatus: RoutePublishStatus.Draft, isActive: false }
+            : { publishStatus: RoutePublishStatus.Archived, isActive: false };
+    if (action === 'publish') {
+      const stops = route.stops.filter((s) => !s.isDeleted);
+      if (stops.length < 2) {
+        throw new AppException(
+          'لا يمكن النشر قبل إضافة محطتين على الأقل',
+          400,
+          ErrorCodes.RouteNotPublishable,
+        );
+      }
+    }
+    await this.prisma.route.update({
+      where: { id: route.id },
+      data: {
+        ...next,
+        shareToken: route.shareToken ?? this.newShareToken(),
+        updatedAt: utcNow(),
+      },
+    });
+    const event =
+      action === 'publish'
+        ? 'CaptainRouteActivated'
+        : action === 'pause'
+          ? 'CaptainRoutePaused'
+          : action === 'archive'
+            ? 'CaptainRouteCancelled'
+            : 'CaptainRouteUpdated';
+    this.logger.log({ event, routeId: route.id });
+    if (action === 'publish') {
+      await this.notifyMatchingDemand(route);
+    }
+    return this.adminGet(id);
+  }
+
+  async adminCreateTrips(id: string, body: Omit<CreateTripsBody, 'routeId'>) {
+    const route = await this.requireCaptainRoute(id);
+    if (!route.ownerDriver) {
+      throw new AppException('المسار بدون كابتن', 400, ErrorCodes.DriverNotFound);
+    }
+    const result = await this.createTripsForDriver(route.ownerDriver, {
+      ...body,
+      routeId: id,
+    });
+    this.logger.log({
+      event: 'ScheduleChanged',
+      routeId: id,
+      count: result.count,
+    });
+    return result;
+  }
+
+  async routesForDriver(driverId: string) {
+    const now = utcNow();
+    const routes = await this.prisma.route.findMany({
+      where: {
+        ownerDriverId: driverId,
+        ownerType: RouteOwnerType.Captain,
+        isDeleted: false,
+      },
+      include: {
+        stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
+        trips: {
+          where: { isDeleted: false },
+          orderBy: { scheduledAt: 'asc' },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    return routes.map((route) => {
+      const nextTrip = route.trips.find(
+        (t) =>
+          t.scheduledAt >= now &&
+          (t.status === TripStatus.Scheduled ||
+            t.status === TripStatus.DriverAssigned ||
+            t.status === TripStatus.InProgress),
+      );
+      return {
+        id: route.id,
+        name: route.name,
+        vehicleKind: route.vehicleKind,
+        capacity: route.capacity,
+        status: captainRouteLifecycle({
+          publishStatus: route.publishStatus,
+          isActive: route.isActive,
+          nextTripAt: nextTrip?.scheduledAt ?? null,
+          now,
+        }),
+        origin: route.stops[0]?.name ?? null,
+        destination: route.stops[route.stops.length - 1]?.name ?? null,
+        nextTripAt: nextTrip?.scheduledAt ?? null,
+        upcomingCount: route.trips.filter(
+          (t) => t.scheduledAt >= now && t.status !== TripStatus.Cancelled && t.status !== TripStatus.Completed,
+        ).length,
+        currentCount: route.trips.filter((t) => tripTimeBucket(t, now) === 'current').length,
+        pastCount: route.trips.filter((t) => tripTimeBucket(t, now) === 'past').length,
+      };
+    });
+  }
+
+  private mapAdminListRow(
+    route: Awaited<ReturnType<CaptainRoutesService['requireCaptainRoute']>>,
+    now: Date,
+  ) {
+    const stops = route.stops.filter((s) => !s.isDeleted).sort((a, b) => a.order - b.order);
+    const upcoming = route.trips.filter(
+      (t) =>
+        t.scheduledAt >= now &&
+        (t.status === TripStatus.Scheduled || t.status === TripStatus.DriverAssigned),
+    );
+    const nextTrip = upcoming[0] ?? null;
+    const remaining = nextTrip
+      ? remainingForRange(nextTrip.segmentInventories, stopsMin(stops), stopsMax(stops))
+      : 0;
+    const capacity = nextTrip?.segmentInventories[0]?.capacity ?? route.capacity ?? 0;
+    const driver = route.ownerDriver;
+    const recurrenceKind = nextTrip?.recurrenceKind ?? route.trips[0]?.recurrenceKind ?? RecurrenceKind.Once;
+    return {
+      id: route.id,
+      name: route.name,
+      origin: stops[0]?.name ?? null,
+      destination: stops[stops.length - 1]?.name ?? null,
+      captain: driver
+        ? {
+            id: driver.id,
+            name: driver.user.fullName,
+            phone: driver.user.phone,
+            photoUrl: driver.user.avatarUrl,
+            isActive: driver.isActive,
+          }
+        : null,
+      vehicleKind: route.vehicleKind ?? captainVehicleKind(driver),
+      vehicle: {
+        plateNumber: driver?.plateNumber ?? driver?.vehicle?.plateNumber ?? null,
+        type: route.vehicleKind ?? captainVehicleKind(driver),
+        capacity,
+      },
+      capacity,
+      pricePerSeat: nextTrip ? money(nextTrip.pricePerSeat) : null,
+      scheduleType: isRecurringKind(recurrenceKind) ? 'recurring' : 'once',
+      recurrenceKind,
+      recurrenceDaysOfWeek: nextTrip?.recurrenceDaysOfWeek ?? route.trips[0]?.recurrenceDaysOfWeek ?? null,
+      nextTripAt: nextTrip?.scheduledAt ?? null,
+      availableSeats: remaining,
+      reservedSeats: Math.max(0, capacity - remaining),
+      status: captainRouteLifecycle({
+        publishStatus: route.publishStatus,
+        isActive: route.isActive,
+        nextTripAt: nextTrip?.scheduledAt ?? null,
+        now,
+      }),
+      tripDates: route.trips.map((t) => cairoDateKey(t.scheduledAt)),
+      createdAt: route.createdAt,
+    };
+  }
+
+  private async requireCaptainRoute(id: string) {
+    const route = await this.prisma.route.findFirst({
+      where: { id, ownerType: RouteOwnerType.Captain, isDeleted: false },
+      include: {
+        stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
+        ownerDriver: { include: { user: true, vehicle: true } },
+        trips: {
+          where: { isDeleted: false },
+          include: {
+            segmentInventories: { where: { isDeleted: false } },
+          },
+          orderBy: { scheduledAt: 'asc' },
+        },
+      },
+    });
+    if (!route) {
+      throw new NotFoundException('مسار الكابتن غير موجود', ErrorCodes.RouteNotFound);
+    }
+    return route;
+  }
+
+  private async requireDriverById(id: string) {
+    const driver = await this.prisma.driver.findFirst({
+      where: { id, isDeleted: false },
+      include: { user: true, vehicle: true },
+    });
+    if (!driver || !driver.isActive) {
+      throw new AppException(
+        'حساب الكابتن غير موجود أو غير نشط',
+        400,
+        ErrorCodes.DriverNotEligible,
+      );
+    }
+    return driver;
+  }
+
   private async notifyMatchingDemand(route: {
     id: string;
     name: string;
@@ -810,9 +1530,11 @@ export class CaptainRoutesService {
 
   private resolveCapacity(
     requested: number | undefined,
-    driver: { seats: number | null; vehicle: { capacity: number } | null },
+    driver: DriverCapacitySource,
+    vehicleKind?: string | null,
   ): number {
-    const value = requested ?? driver.seats ?? driver.vehicle?.capacity ?? 4;
+    const fallback = defaultCapacityForVehicleKind(vehicleKind ?? driver.vehicleKind);
+    const value = requested ?? driver.seats ?? driver.vehicle?.capacity ?? fallback;
     if (!Number.isInteger(value) || value < 1) {
       throw new AppException('سعة المركبة غير صالحة', 400, ErrorCodes.InvalidSeatCount);
     }
@@ -896,4 +1618,19 @@ function stopsMin(stops: Array<{ order: number }>): number {
 
 function stopsMax(stops: Array<{ order: number }>): number {
   return Math.max(...stops.map((s) => s.order));
+}
+
+function cairoDateKey(date: Date): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
+
+function scheduleLabel(kind?: number | null): 'once' | 'weekly' | 'range' {
+  if (kind === RecurrenceKind.Weekly) return 'weekly';
+  if (kind === RecurrenceKind.DateRange) return 'range';
+  return 'once';
 }

@@ -1,11 +1,26 @@
 import { RecurrenceKind } from '../../common/enums';
-import { occurrenceDates, parseDaysOfWeek, parseRecurrenceKind } from './recurrence';
+import { occurrenceDates, parseDaysOfWeek, parseRecurrenceKind, daysForScheduleType } from './recurrence';
 
 describe('recurrence', () => {
   it('parses kind aliases', () => {
     expect(parseRecurrenceKind('once')).toBe(RecurrenceKind.Once);
+    expect(parseRecurrenceKind('one-time')).toBe(RecurrenceKind.Once);
     expect(parseRecurrenceKind('weekly')).toBe(RecurrenceKind.Weekly);
+    expect(parseRecurrenceKind('daily')).toBe(RecurrenceKind.Weekly);
+    expect(parseRecurrenceKind('specific-days')).toBe(RecurrenceKind.Weekly);
     expect(parseRecurrenceKind('range')).toBe(RecurrenceKind.DateRange);
+  });
+
+  it('daily expands to every weekday', () => {
+    expect(daysForScheduleType('daily')).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    const at = new Date('2026-10-04T07:30:00.000Z');
+    const dates = occurrenceDates({
+      kind: RecurrenceKind.Weekly,
+      scheduledAt: at,
+      daysOfWeek: daysForScheduleType('daily'),
+    });
+    expect(dates.length).toBeGreaterThan(7);
+    expect(new Set(dates.map((d) => d.getUTCDay())).size).toBe(7);
   });
 
   it('generates a single occurrence for once', () => {

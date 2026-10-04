@@ -34,6 +34,7 @@ import {
   remainingForRange,
   segmentPrice,
 } from '../marketplace/segment-occupancy';
+import { riderHistoryBucket } from './rider-history-bucket';
 
 @ApiTags('bookings')
 @Controller('api/v1/bookings')
@@ -114,7 +115,9 @@ export class BookingsController {
       destinationStopId?: string;
       sourceType?: string;
       scheduledAt: Date;
-      vehicleBucket: 'carshuttle' | 'minibus' | 'bus';
+      vehicleKind?: string | null;
+      captainRouteId?: string | null;
+      vehicleBucket: 'carshuttle' | 'minibus' | 'bus' | 'scooter';
     };
     const offers: PreviewOffer[] = [];
     for (const trip of platformTrips) {
@@ -143,6 +146,7 @@ export class BookingsController {
           ),
           originStopId: match.origin.id,
           destinationStopId: match.destination.id,
+          vehicleKind: trip.route.vehicleKind ?? null,
           vehicleBucket: classifyVehicle(
             trip.route.vehicleKind,
             trip.route.capacity,
@@ -161,6 +165,7 @@ export class BookingsController {
         ),
         originStopId: first?.id,
         destinationStopId: last && last.id !== first?.id ? last.id : undefined,
+        vehicleKind: trip.route.vehicleKind ?? null,
         vehicleBucket: classifyVehicle(
           trip.route.vehicleKind,
           trip.route.capacity,
@@ -224,7 +229,9 @@ export class BookingsController {
           availableSeats: remaining,
           originStopId: match.origin.id,
           destinationStopId: match.destination.id,
-          vehicleBucket: classifyVehicle(
+          vehicleKind: trip.route.vehicleKind ?? trip.driver?.vehicleKind ?? null,
+        captainRouteId: trip.routeId,
+        vehicleBucket: classifyVehicle(
             trip.route.vehicleKind ?? trip.driver?.vehicleKind,
             trip.route.capacity ?? trip.driver?.seats,
             remaining,
@@ -246,7 +253,7 @@ export class BookingsController {
         .filter((offer) => sameCairoDay(offer.scheduledAt, day))
         .map(({ scheduledAt: _scheduledAt, vehicleBucket, ...offer }) => ({
           ...offer,
-          vehicleKind: vehicleBucket,
+          vehicleKind: offer.vehicleKind || vehicleBucket,
         })),
     );
 
@@ -395,7 +402,11 @@ export class BookingsController {
           usesSubscriptionCredit: paymentMethod === 'subscription',
           originStopId: origin?.id ?? null,
           destinationStopId: destination?.id ?? null,
-          vehicleKind: body.vehicleKind?.trim().slice(0, 40) || null,
+          vehicleKind:
+            body.vehicleKind?.trim().slice(0, 40) ||
+            trip.route.vehicleKind?.trim().slice(0, 40) ||
+            trip.driver?.vehicleKind?.trim().slice(0, 40) ||
+            null,
           ...baseFields(),
         },
       });
@@ -500,13 +511,9 @@ export class TripsController {
         destinationStop: true,
         trip: { include: { route: true, driver: true } },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { trip: { scheduledAt: 'desc' } },
     });
-    const upcomingStatuses = new Set([
-      TripStatus.Scheduled,
-      TripStatus.DriverAssigned,
-      TripStatus.InProgress,
-    ]);
+    const now = new Date();
     // JSON-safe DTOs (Prisma Decimal / null trip must not break history).
     const mapped = bookings
       .filter((b) => b.trip != null)
@@ -567,18 +574,20 @@ export class TripsController {
             : null,
         },
       }));
+    const buckets = mapped.map((booking) => ({
+      booking,
+      bucket: riderHistoryBucket({
+        bookingStatus: booking.status,
+        tripStatus: booking.trip.status,
+        scheduledAt: new Date(booking.trip.scheduledAt),
+        now,
+      }),
+    }));
     return ApiResponse.ok({
-      upcoming: mapped.filter(
-        (b) =>
-          b.status !== BookingStatus.Cancelled &&
-          upcomingStatuses.has(b.trip.status as 1 | 2 | 3),
-      ),
-      past: mapped.filter(
-        (b) =>
-          b.status === BookingStatus.Cancelled ||
-          b.trip.status === TripStatus.Completed ||
-          b.trip.status === TripStatus.Cancelled,
-      ),
+      upcoming: buckets
+        .filter((row) => row.bucket === 'upcoming' || row.bucket === 'current')
+        .map((row) => row.booking),
+      past: buckets.filter((row) => row.bucket === 'past').map((row) => row.booking),
     });
   }
 
@@ -615,7 +624,34 @@ export class TripsController {
         include: { rider: true },
       });
       if (!ride) {
-        throw new NotFoundException('الفاتورة غير موجودة');
+        const member = await this.prisma.groupMember.findFirst({
+          where: { groupRequestId: id, userId, isDeleted: false },
+          include: { user: true, groupRequest: true },
+        });
+        const group = member?.groupRequest;
+        if (!member || !group || group.isDeleted) {
+          throw new NotFoundException('الفاتورة غير موجودة');
+        }
+        const amount = money(group.totalAmount);
+        const seatFare = money(group.fareAmount);
+        const when = group.confirmedAt ?? group.createdAt;
+        const reference = group.referenceCode?.trim() || group.id.slice(0, 8);
+        return ApiResponse.ok({
+          bookingId: group.id,
+          amount,
+          status: 'cash',
+          paidAt: null,
+          tripId: reference.startsWith('#') ? reference : `#${reference}`,
+          dateTimeLabel: `${when.toLocaleDateString('ar-EG', { weekday: 'long' })} ${formatDate(when)} - ${formatHm(when)} - نقدا`,
+          passengerName: member.user.fullName?.trim() || '',
+          lineItems: buildInvoiceLines({
+            total: amount,
+            baseFare: money(group.baseFareApplied ?? 0),
+            distanceKm: money(group.distanceKm ?? 0),
+            pricePerKm: money(group.pricePerKmApplied ?? 0),
+            fareAmount: seatFare,
+          }),
+        });
       }
       const amount = money(ride.totalAmount);
       const seatFare = money(ride.fareAmount);
@@ -829,11 +865,14 @@ function buildInvoiceLines(input: {
 
 function previewVehicleBucket(
   raw?: string,
-): 'carshuttle' | 'minibus' | 'bus' | null {
+): 'carshuttle' | 'minibus' | 'bus' | 'scooter' | null {
   const value = raw?.trim().toLowerCase();
   if (value === '0' || value === 'car' || value === 'carshuttle') return 'carshuttle';
   if (value === '1' || value === 'minibus' || value === 'mini') return 'minibus';
   if (value === '2' || value === 'bus') return 'bus';
+  if (value === '3' || value === '4' || value === 'scooter' || value === 'scooters' || value === 'سكوتر') {
+    return 'scooter';
+  }
   return null;
 }
 
@@ -841,7 +880,11 @@ function classifyVehicle(
   kind?: string | null,
   capacity?: number | null,
   seatsHint?: number | null,
-): 'carshuttle' | 'minibus' | 'bus' {
+): 'carshuttle' | 'minibus' | 'bus' | 'scooter' {
+  const text = (kind ?? '').trim().toLowerCase();
+  if (text.includes('scooter') || text.includes('سكوتر')) {
+    return 'scooter';
+  }
   // Priority:
   // 1) Route.Capacity / Driver.Seats
   // 2) Route.VehicleKind / Driver.VehicleKind text
@@ -854,7 +897,6 @@ function classifyVehicle(
         ? seatsHint
         : null;
 
-  const text = (kind ?? '').trim().toLowerCase();
   if (
     text.includes('mini') ||
     text.includes('ميني') ||

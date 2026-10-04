@@ -7,10 +7,16 @@ export const MAX_GENERATED_TRIPS = 60;
 
 export function parseRecurrenceKind(raw?: string | null): RecurrenceKind {
   const value = (raw ?? 'once').trim().toLowerCase();
-  if (value === '' || value === 'once') {
+  if (value === '' || value === 'once' || value === 'onetime' || value === 'one-time') {
     return RecurrenceKind.Once;
   }
-  if (value === 'weekly') {
+  if (
+    value === 'weekly' ||
+    value === 'daily' ||
+    value === 'specific' ||
+    value === 'specificdays' ||
+    value === 'specific-days'
+  ) {
     return RecurrenceKind.Weekly;
   }
   if (value === 'range' || value === 'daterange' || value === 'date-range') {
@@ -35,6 +41,20 @@ export function parseDaysOfWeek(raw?: number[] | string | null): number[] {
 
 export function daysOfWeekCsv(days: number[]): string | null {
   return days.length > 0 ? days.join(',') : null;
+}
+
+const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
+
+/** Maps admin/captain schedule type to recurrence days. Daily = every weekday. */
+export function daysForScheduleType(
+  scheduleType?: string | null,
+  daysOfWeek?: number[] | string | null,
+): number[] {
+  const value = (scheduleType ?? '').trim().toLowerCase();
+  if (value === 'daily') {
+    return [...ALL_DAYS];
+  }
+  return parseDaysOfWeek(daysOfWeek);
 }
 
 export function occurrenceDates(input: {

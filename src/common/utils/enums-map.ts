@@ -82,6 +82,14 @@ export function vehicleKindFamily(raw?: string | number | null): VehicleKindFami
   return null;
 }
 
+export function defaultCapacityForVehicleKind(raw?: string | number | null): number {
+  const family = vehicleKindFamily(raw);
+  if (family === 'scooter') return 1;
+  if (family === 'minibus') return 13;
+  if (family === 'bus') return 24;
+  return 4;
+}
+
 export function vehicleKindsCompatible(
   required?: string | number | null,
   captain?: string | number | null,
@@ -94,10 +102,10 @@ export function vehicleKindsCompatible(
 export function captainVehicleKind(driver: {
   vehicleKind?: string | null;
   vehicle?: { type?: number | null } | null;
-}): string | null {
-  const kind = driver.vehicleKind?.trim();
+} | null | undefined): string | null {
+  const kind = driver?.vehicleKind?.trim();
   if (kind) return kind;
-  if (driver.vehicle?.type != null) return vehicleTypeLabel(driver.vehicle.type);
+  if (driver?.vehicle?.type != null) return vehicleTypeLabel(driver.vehicle.type);
   return null;
 }
 

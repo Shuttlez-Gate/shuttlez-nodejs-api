@@ -158,6 +158,9 @@ export class GroupsService {
           groupRequestId: id,
           userId,
           isOrganizer: true,
+          pickupLatitude: body.pickupLatitude,
+          pickupLongitude: body.pickupLongitude,
+          pickupAddress: trimOrNull(body.pickupAddress),
           joinedAt: utcNow(),
           ...baseFields(),
         },
@@ -166,9 +169,10 @@ export class GroupsService {
     return this.byId(id);
   }
 
-  async join(groupId: string) {
+  async join(groupId: string, body?: GroupPickupInput) {
     const userId = this.currentUser.requireUserId();
     const group = await this.requireGroup(groupId);
+    const pickup = pickupFields(body);
     try {
       await this.prisma.$transaction(async (tx) => {
         const current = await tx.groupRequest.findFirst({
@@ -194,6 +198,13 @@ export class GroupsService {
           },
         });
         if (already) {
+          if (pickup) {
+            await tx.groupMember.update({
+              where: { id: already.id },
+              data: pickup,
+            });
+            return;
+          }
           throw new AppException(
             'أنت عضو بالفعل في هذه المجموعة',
             400,
@@ -230,6 +241,7 @@ export class GroupsService {
             isOrganizer: false,
             joinedAt: utcNow(),
             ...baseFields(),
+            ...(pickup ?? {}),
           },
         });
       });
@@ -247,6 +259,176 @@ export class GroupsService {
       throw error;
     }
     return this.broadcast(group.id);
+  }
+
+  async setPickup(groupId: string, body?: GroupPickupInput) {
+    const userId = this.currentUser.requireUserId();
+    const pickup = pickupFields(body);
+    if (!pickup) {
+      throw new AppException('نقطة الانطلاق غير صالحة', 400, ErrorCodes.TripCoordinatesRequired);
+    }
+    const group = await this.requireGroup(groupId);
+    if (
+      group.status === GroupRequestStatus.Completed ||
+      group.status === GroupRequestStatus.Cancelled
+    ) {
+      throw new AppException(
+        'لا يمكن تعديل نقطة الانطلاق لهذه الرحلة',
+        400,
+        ErrorCodes.GroupMembershipLocked,
+      );
+    }
+    const member = group.members.find((m) => m.userId === userId && !m.isDeleted);
+    if (!member) {
+      throw new AppException('لست عضواً في المجموعة', 400, ErrorCodes.GroupNotMember);
+    }
+    await this.prisma.groupMember.update({
+      where: { id: member.id },
+      data: pickup,
+    });
+    return this.broadcast(group.id);
+  }
+
+  async listMemberMessages(groupId: string, peerUserId: string) {
+    const userId = this.currentUser.requireUserId();
+    const group = await this.requireGroup(groupId);
+    const peer = this.assertChatPair(group, userId, peerUserId);
+    const rows = await this.prisma.groupMemberMessage.findMany({
+      where: {
+        groupRequestId: group.id,
+        isDeleted: false,
+        OR: [
+          { senderUserId: userId, recipientUserId: peer },
+          { senderUserId: peer, recipientUserId: userId },
+        ],
+      },
+      orderBy: { createdAt: 'asc' },
+      take: 200,
+    });
+    return rows.map(mapMemberMessage);
+  }
+
+  async sendMemberMessage(
+    groupId: string,
+    body?: { peerUserId?: string; body?: string },
+  ) {
+    const userId = this.currentUser.requireUserId();
+    const text = body?.body?.trim() ?? '';
+    if (!text || text.length > 2000) {
+      throw new AppException('الرسالة غير صالحة', 400, ErrorCodes.GroupNotMember);
+    }
+    const group = await this.requireGroup(groupId);
+    const peer = this.assertChatPair(group, userId, body?.peerUserId ?? '');
+    const row = await this.prisma.groupMemberMessage.create({
+      data: {
+        id: newId(),
+        groupRequestId: group.id,
+        senderUserId: userId,
+        recipientUserId: peer,
+        body: text,
+        ...baseFields(),
+      },
+    });
+    const message = mapMemberMessage(row);
+    this.groupHub.publishChat(message);
+    return message;
+  }
+
+  async unreadMemberMessages(groupId: string) {
+    const userId = this.currentUser.requireUserId();
+    const group = await this.requireGroup(groupId);
+    this.assertChatMember(group, userId);
+    const rows = await this.prisma.groupMemberMessage.groupBy({
+      by: ['senderUserId'],
+      where: {
+        groupRequestId: group.id,
+        recipientUserId: userId,
+        isDeleted: false,
+        readAt: null,
+      },
+      _count: { _all: true },
+    });
+    return rows.map((row) => ({
+      peerUserId: row.senderUserId,
+      count: row._count._all,
+    }));
+  }
+
+  async markMemberMessagesRead(groupId: string, peerUserId: string) {
+    const userId = this.currentUser.requireUserId();
+    const group = await this.requireGroup(groupId);
+    const peer = this.assertChatPair(group, userId, peerUserId);
+    await this.prisma.groupMemberMessage.updateMany({
+      where: {
+        groupRequestId: group.id,
+        senderUserId: peer,
+        recipientUserId: userId,
+        isDeleted: false,
+        readAt: null,
+      },
+      data: { readAt: utcNow(), updatedAt: utcNow() },
+    });
+    this.groupHub.publishChatRead({
+      groupId: group.id,
+      readerUserId: userId,
+      peerUserId: peer,
+    });
+    return { peerUserId: peer, count: 0 };
+  }
+
+  private readonly typingUntil = new Map<string, number>();
+
+  async notifyMemberTyping(groupId: string, peerUserId: string, typing: boolean) {
+    const userId = this.currentUser.requireUserId();
+    const group = await this.requireGroup(groupId);
+    const peer = this.assertChatPair(group, userId, peerUserId);
+    const key = `${group.id}:${userId}:${peer}`;
+    if (typing) this.typingUntil.set(key, Date.now() + 3000);
+    else this.typingUntil.delete(key);
+    this.groupHub.publishTyping({
+      groupId: group.id,
+      senderUserId: userId,
+      peerUserId: peer,
+      typing,
+    });
+    return { typing };
+  }
+
+  async memberTypingPeers(groupId: string) {
+    const userId = this.currentUser.requireUserId();
+    const group = await this.requireGroup(groupId);
+    this.assertChatMember(group, userId);
+    const now = Date.now();
+    return group.members
+      .filter((member) => !member.isDeleted && member.userId !== userId)
+      .filter(
+        (member) =>
+          (this.typingUntil.get(`${group.id}:${member.userId}:${userId}`) ?? 0) > now,
+      )
+      .map((member) => ({ peerUserId: member.userId }));
+  }
+
+  private assertChatPair(group: GroupRow, userId: string, peerUserId: string) {
+    const peer = peerUserId.trim();
+    if (!isGroupUuid(peer) || peer === userId) {
+      throw new AppException('لا يمكن فتح هذه المحادثة', 400, ErrorCodes.GroupNotMember);
+    }
+    const members = new Set(
+      group.members.filter((member) => !member.isDeleted).map((member) => member.userId),
+    );
+    if (!members.has(userId) || !members.has(peer)) {
+      throw new AppException('لست عضواً في المجموعة', 400, ErrorCodes.GroupNotMember);
+    }
+    return peer;
+  }
+
+  private assertChatMember(group: GroupRow, userId: string) {
+    const members = new Set(
+      group.members.filter((member) => !member.isDeleted).map((member) => member.userId),
+    );
+    if (!members.has(userId)) {
+      throw new AppException('لست عضواً في المجموعة', 400, ErrorCodes.GroupNotMember);
+    }
   }
 
   async leave(groupId: string) {
@@ -324,6 +506,10 @@ export class GroupsService {
       orderBy: { createdAt: 'desc' },
     });
     return items.map((g) => this.mapGroup(g));
+  }
+
+  async publishGroup(groupId: string) {
+    return this.broadcast(groupId);
   }
 
   private async broadcast(groupId: string) {
@@ -422,6 +608,14 @@ export class GroupsService {
       membershipLocked: group.membershipLocked,
       driverId: group.driverId,
       driverName: group.driver?.user.fullName ?? null,
+      driverPhone: group.driver?.user.phone ?? null,
+      driverAvatarUrl: group.driver?.user.avatarUrl ?? null,
+      driverRatingAverage: driverRating(group.driver),
+      driverRatingCount: driverRatingCount(group.driver),
+      driverVehicleKind: firstText(group.driver?.vehicleKind),
+      driverVehicleModel: firstText(group.driver?.vehicleModelName),
+      driverVehicleColor: firstText(group.driver?.vehicleColor),
+      driverPlate: firstText(group.driver?.plateNumber),
       confirmedAt: group.confirmedAt,
       assignedAt: group.assignedAt,
       startedAt: group.startedAt,
@@ -431,6 +625,8 @@ export class GroupsService {
       createdAt: group.createdAt,
       members: group.members
         .filter((m) => !m.isDeleted)
+        .slice()
+        .sort((a, b) => a.joinedAt.getTime() - b.joinedAt.getTime())
         .map((m) => ({
           userId: m.userId,
           displayName: m.user.fullName,
@@ -440,10 +636,31 @@ export class GroupsService {
           avatarUrl: m.user.avatarUrl,
           ratingAverage: Number(m.user.ratingAverage),
           ratingCount: m.user.ratingCount,
+          pickupLatitude: m.pickupLatitude,
+          pickupLongitude: m.pickupLongitude,
+          pickupAddress: m.pickupAddress,
         })),
       distanceKm: group.distanceKm == null ? null : money(group.distanceKm),
     };
   }
+}
+
+function mapMemberMessage(row: {
+  id: string;
+  groupRequestId: string;
+  senderUserId: string;
+  recipientUserId: string;
+  body: string;
+  createdAt: Date;
+}) {
+  return {
+    id: row.id,
+    groupId: row.groupRequestId,
+    senderUserId: row.senderUserId,
+    recipientUserId: row.recipientUserId,
+    body: row.body,
+    createdAt: row.createdAt,
+  };
 }
 
 function isGroupUuid(value: string): boolean {
@@ -459,7 +676,50 @@ const groupInclude = {
 
 type GroupRow = Prisma.GroupRequestGetPayload<{ include: typeof groupInclude }>;
 
+function firstText(...values: Array<string | null | undefined>): string | null {
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (trimmed) return trimmed;
+  }
+  return null;
+}
+
+function driverRating(
+  driver: GroupRow['driver'],
+): number | null {
+  if (!driver) return null;
+  const count = driver.ratingCount ?? 0;
+  if (count > 0) return Number(driver.ratingAverage);
+  if ((driver.user.ratingCount ?? 0) > 0) return Number(driver.user.ratingAverage);
+  return Number(driver.ratingAverage);
+}
+
+function driverRatingCount(driver: GroupRow['driver']): number | null {
+  if (!driver) return null;
+  if ((driver.ratingCount ?? 0) > 0) return driver.ratingCount;
+  return driver.user.ratingCount ?? 0;
+}
+
 function trimOrNull(value?: string | null): string | null {
   const v = value?.trim();
   return v ? v : null;
+}
+
+type GroupPickupInput = {
+  pickupLatitude?: number;
+  pickupLongitude?: number;
+  pickupAddress?: string;
+};
+
+function pickupFields(body?: GroupPickupInput) {
+  const lat = Number(body?.pickupLatitude);
+  const lng = Number(body?.pickupLongitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return {
+    pickupLatitude: lat,
+    pickupLongitude: lng,
+    pickupAddress: trimOrNull(body?.pickupAddress),
+    updatedAt: utcNow(),
+  };
 }

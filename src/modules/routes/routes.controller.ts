@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Post } from '@nestjs/common';
+import { Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { ApiResponse } from '../../common/api-response';
 import { AppException, NotFoundException } from '../../common/exceptions/app.exception';
@@ -61,8 +61,28 @@ export class RoutesController {
 
   /** Rider-facing catalog of published captain routes (Figma: Captain Routes). */
   @Get('captain')
-  async listCaptainRoutes() {
-    return ApiResponse.ok(await this.captainRoutes.listPublishedForRiders());
+  async listCaptainRoutes(
+    @Query('fromLatitude') fromLatitude?: string,
+    @Query('fromLongitude') fromLongitude?: string,
+    @Query('toLatitude') toLatitude?: string,
+    @Query('toLongitude') toLongitude?: string,
+    @Query('date') date?: string,
+    @Query('time') time?: string,
+    @Query('passengers') passengers?: string,
+    @Query('vehicleKind') vehicleKind?: string,
+  ) {
+    return ApiResponse.ok(
+      await this.captainRoutes.listPublishedForRiders({
+        fromLatitude: optionalNumber(fromLatitude),
+        fromLongitude: optionalNumber(fromLongitude),
+        toLatitude: optionalNumber(toLatitude),
+        toLongitude: optionalNumber(toLongitude),
+        date,
+        time,
+        passengers: optionalNumber(passengers),
+        vehicleKind,
+      }),
+    );
   }
 
   @Get(':id/timeline')
@@ -104,4 +124,10 @@ export class CustomerTripsController {
 
 function uncheckedInt(value: number): number {
   return value | 0;
+}
+
+function optionalNumber(raw?: string): number | null {
+  if (raw == null || raw.trim() === '') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
 }

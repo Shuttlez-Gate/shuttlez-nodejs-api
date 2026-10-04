@@ -51,6 +51,7 @@ import {
   AdminRideFareController,
 } from '../admin/admin-fares.controller';
 import { AdminRouteDemandController } from '../admin/admin-demand.controller';
+import { AdminCaptainRoutesController } from '../admin/admin-captain-routes.controller';
 import { RouteDemandService } from '../admin/route-demand/route-demand.service';
 import { CorridorDemandService } from '../admin/corridor-demand.service';
 import { AdminDashboardService } from '../admin/dashboard.service';
@@ -101,6 +102,7 @@ import { RealtimeModule } from '../realtime/realtime.module';
     AdminRideFareController,
     AdminGroupFareController,
     AdminRouteDemandController,
+    AdminCaptainRoutesController,
     AdminSupportController,
     AdminNotificationsController,
     AdminRidesController,

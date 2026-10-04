@@ -44,6 +44,7 @@ import {
   verificationLabel,
 } from '../../common/utils/enums-map';
 import { parseGender } from '../auth/auth.mapper';
+import { CaptainRoutesService } from '../marketplace/captain-routes.service';
 
 @ApiTags('admin-users')
 @AdminOnly()
@@ -373,7 +374,10 @@ export class AdminVehiclesController {
 @AdminOnly()
 @Controller('api/v1/admin/drivers')
 export class AdminDriversController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly captainRoutes: CaptainRoutesService,
+  ) {}
 
   @Get()
   async list(
@@ -435,6 +439,7 @@ export class AdminDriversController {
     if (!driver) {
       throw new NotFoundException('الكابتن غير موجود', ErrorCodes.DriverNotFound);
     }
+    const ownedRoutes = await this.captainRoutes.routesForDriver(driver.id);
     return ApiResponse.ok({
       id: driver.id,
       userId: driver.userId,
@@ -467,6 +472,7 @@ export class AdminDriversController {
       tripCount: driver._count.trips,
       createdAt: driver.createdAt,
       documents: driver.documents.map(mapDoc),
+      ownedRoutes,
     });
   }
 

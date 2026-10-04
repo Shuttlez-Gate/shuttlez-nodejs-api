@@ -392,6 +392,7 @@ export class DriversService {
         where: { id: group.id },
         data: { status: GroupRequestStatus.InProgress, startedAt: utcNow(), updatedAt: utcNow() },
       });
+      await this.groups.publishGroup(updated.id);
       return {
         groupId: updated.id,
         driverId: driver.id,
@@ -422,6 +423,7 @@ export class DriversService {
       where: { id: group.id },
       data: { status: GroupRequestStatus.Completed, completedAt: utcNow(), updatedAt: utcNow() },
     });
+    await this.groups.publishGroup(updated.id);
     return {
       groupId: updated.id,
       driverId: driver.id,

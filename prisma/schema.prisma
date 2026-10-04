@@ -747,8 +747,11 @@ model GroupMember {
   id             String       @id(map: "PK_GroupMembersSet") @map("Id") @db.Uuid
   groupRequestId String       @map("GroupRequestId") @db.Uuid
   userId         String       @map("UserId") @db.Uuid
-  isOrganizer    Boolean      @map("IsOrganizer")
-  joinedAt       DateTime     @map("JoinedAt") @db.Timestamptz(6)
+  isOrganizer     Boolean      @map("IsOrganizer")
+  pickupLatitude  Float?       @map("PickupLatitude")
+  pickupLongitude Float?       @map("PickupLongitude")
+  pickupAddress   String?      @map("PickupAddress") @db.VarChar(512)
+  joinedAt        DateTime     @map("JoinedAt") @db.Timestamptz(6)
   createdAt      DateTime     @map("CreatedAt") @db.Timestamptz(6)
   updatedAt      DateTime?    @map("UpdatedAt") @db.Timestamptz(6)
   isDeleted      Boolean      @map("IsDeleted")
@@ -758,6 +761,22 @@ model GroupMember {
   @@unique([groupRequestId, userId], map: "IX_GroupMembersSet_GroupRequestId_UserId")
   @@index([userId], map: "IX_GroupMembersSet_UserId")
   @@map("GroupMembersSet")
+}
+
+model GroupMemberMessage {
+  id              String    @id(map: "PK_GroupMemberMessagesSet") @map("Id") @db.Uuid
+  groupRequestId  String    @map("GroupRequestId") @db.Uuid
+  senderUserId    String    @map("SenderUserId") @db.Uuid
+  recipientUserId String    @map("RecipientUserId") @db.Uuid
+  body            String    @map("Body") @db.VarChar(2000)
+  readAt          DateTime? @map("ReadAt") @db.Timestamptz(6)
+  createdAt       DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt       DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted       Boolean   @map("IsDeleted")
+
+  @@index([groupRequestId, senderUserId, recipientUserId], map: "IX_GroupMemberMessagesSet_Thread")
+  @@index([groupRequestId, createdAt], map: "IX_GroupMemberMessagesSet_GroupRequestId_CreatedAt")
+  @@map("GroupMemberMessagesSet")
 }
 
 /// EF Core migrations history table — present on Neon. Keep mapped, unused by app code.
