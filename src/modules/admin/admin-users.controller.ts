@@ -14,8 +14,6 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiConsumes, ApiTags } from '@nestjs/swagger';
 import { memoryStorage } from 'multer';
-import { mkdirSync, writeFileSync } from 'fs';
-import { join } from 'path';
 import { Prisma } from '@prisma/client';
 import { ApiResponse } from '../../common/api-response';
 import { AdminOnly } from '../../common/decorators/admin-only.decorator';
@@ -33,6 +31,11 @@ import {
   walletDefaults,
 } from '../../common/utils/entity-defaults';
 import { money } from '../../common/utils/money';
+import {
+  driverDocumentMediaUrl,
+  toDataUrlStoragePath,
+} from '../../common/utils/document-storage';
+import { DriverDocumentType } from '../../common/enums';
 import {
   documentTypeLabel,
   parseDocumentType,
@@ -415,6 +418,10 @@ export class AdminDriversController {
         include: {
           user: true,
           vehicle: true,
+          documents: {
+            where: { isDeleted: false },
+            orderBy: { createdAt: 'desc' },
+          },
           _count: { select: { documents: true, trips: true } },
         },
       }),
@@ -654,24 +661,27 @@ export class AdminDriversController {
     if (!file?.buffer?.length) {
       throw new AppException('الملف مطلوب');
     }
-    const dir = join(process.cwd(), process.env.UPLOAD_DIR || 'uploads');
-    mkdirSync(dir, { recursive: true });
-    const stored = `${id}-${Date.now()}-${file.originalname.replace(/[^\w.\-]/g, '_')}`;
-    writeFileSync(join(dir, stored), file.buffer);
+    const type = parseDocumentType(documentType);
     const doc = await this.prisma.driverDocument.create({
       data: {
         id: newId(),
         driverId: id,
-        documentType: parseDocumentType(documentType),
+        documentType: type,
         fileName: file.originalname,
         contentType: file.mimetype || 'application/octet-stream',
         sizeBytes: BigInt(file.size),
-        storagePath: stored,
+        storagePath: toDataUrlStoragePath(file),
         notes: notes ?? null,
         uploadedBy: 'admin',
         ...baseFields(),
       },
     });
+    if (type === DriverDocumentType.PersonalPhoto) {
+      await this.prisma.user.update({
+        where: { id: driver.userId },
+        data: { avatarUrl: driverDocumentMediaUrl(doc.id), updatedAt: utcNow() },
+      });
+    }
     return ApiResponse.ok(mapDoc(doc), 'تم رفع المرفق');
   }
 
@@ -777,15 +787,34 @@ function mapDriverList(d: {
   plateNumber: string | null;
   vehicleModelName: string | null;
   seats: number | null;
-  user: { phone: string; fullName: string | null };
+  user: { phone: string; fullName: string | null; avatarUrl?: string | null };
   vehicle: { plateNumber: string; model: string; type: number } | null;
+  documents?: Array<{
+    id: string;
+    documentType: number;
+    fileName: string;
+    contentType: string;
+  }>;
   _count: { documents: number; trips: number };
 }) {
+  const documents = (d.documents ?? []).map((doc) => ({
+    id: doc.id,
+    documentType: documentTypeLabel(doc.documentType),
+    fileName: doc.fileName,
+    contentType: doc.contentType,
+    url: driverDocumentMediaUrl(doc.id),
+  }));
+  const photo =
+    d.user.avatarUrl ||
+    documents.find((doc) => doc.documentType === 'PersonalPhoto')?.url ||
+    documents.find((doc) => (doc.contentType || '').startsWith('image/'))?.url ||
+    null;
   return {
     id: d.id,
     userId: d.userId,
     phone: d.user.phone,
     fullName: d.user.fullName,
+    photoUrl: photo,
     vehicleId: d.vehicleId,
     vehiclePlate: d.plateNumber ?? d.vehicle?.plateNumber,
     vehicleModel: d.vehicleModelName ?? d.vehicle?.model,
@@ -798,6 +827,7 @@ function mapDriverList(d: {
     isActive: d.isActive,
     verificationStatus: verificationLabel(d.verificationStatus),
     documentCount: d._count.documents,
+    documents,
     tripCount: d._count.trips,
     createdAt: d.createdAt,
   };
@@ -820,7 +850,7 @@ function mapDoc(d: {
     fileName: d.fileName,
     contentType: d.contentType,
     sizeBytes: Number(d.sizeBytes),
-    url: `/uploads/${d.storagePath}`,
+    url: driverDocumentMediaUrl(d.id),
     uploadedBy: d.uploadedBy,
     notes: d.notes,
     createdAt: d.createdAt,

@@ -30,6 +30,9 @@ export function normalizeMoney(value: number): number {
   return Math.round(value * 100 + Number.EPSILON) / 100;
 }
 
+/** Default Shuttlez cut on routes when no active CommissionRule applies. */
+export const DEFAULT_PLATFORM_COMMISSION_PERCENT = 10;
+
 export function calculateTotal(pricePerSeat: number, seatCount: number): number {
   if (seatCount <= 0) {
     throw new AppException('عدد المقاعد غير صالح', 400, ErrorCodes.InvalidSeatCount);

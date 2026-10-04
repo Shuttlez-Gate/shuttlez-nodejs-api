@@ -3,6 +3,7 @@ import { PrismaService } from '../../database/prisma/prisma.service';
 import { AppException } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/error-codes';
 import {
+  DEFAULT_PLATFORM_COMMISSION_PERCENT,
   distanceFare,
   haversineKm,
   money,
@@ -61,7 +62,9 @@ export class FareService {
       },
       orderBy: { createdAt: 'desc' },
     });
-    return rule ? money(rule.platformCommissionPercent) : 0;
+    return rule
+      ? money(rule.platformCommissionPercent)
+      : DEFAULT_PLATFORM_COMMISSION_PERCENT;
   }
 
   async activeCommissionRule(asOf = new Date()) {

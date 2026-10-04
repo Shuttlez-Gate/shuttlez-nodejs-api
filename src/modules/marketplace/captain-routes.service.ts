@@ -804,6 +804,8 @@ export class CaptainRoutesService {
         departureTime: nextTrip?.scheduledAt ?? null,
         pricePerSeat: nextTrip ? money(nextTrip.pricePerSeat) : null,
         hasAvailableSeats: remainingSeats > 0,
+        nextTripId: nextTrip?.id ?? null,
+        bookedByMe: false,
         captain: driver
           ? {
               id: driver.id,
@@ -821,6 +823,27 @@ export class CaptainRoutesService {
         recurrenceKind: nextTrip?.recurrenceKind ?? null,
         recurrenceDays: nextTrip?.recurrenceDaysOfWeek ?? null,
       });
+    }
+    const userId = this.currentUser.userId;
+    if (userId) {
+      const tripIds = results
+        .map((row) => row.nextTripId)
+        .filter((id): id is string => Boolean(id));
+      if (tripIds.length > 0) {
+        const mine = await this.prisma.booking.findMany({
+          where: {
+            userId,
+            isDeleted: false,
+            tripId: { in: tripIds },
+            status: { in: [BookingStatus.Pending, BookingStatus.Confirmed] },
+          },
+          select: { tripId: true },
+        });
+        const booked = new Set(mine.map((row) => row.tripId));
+        for (const row of results) {
+          row.bookedByMe = row.nextTripId != null && booked.has(row.nextTripId);
+        }
+      }
     }
     return results;
   }

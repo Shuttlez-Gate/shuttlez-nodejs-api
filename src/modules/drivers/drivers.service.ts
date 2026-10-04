@@ -8,6 +8,7 @@ import {
 import { ErrorCodes } from '../../common/error-codes';
 import {
   BookingStatus,
+  DriverDocumentType,
   GroupRequestStatus,
   RideRequestStatus,
   TripStatus,
@@ -15,6 +16,10 @@ import {
 import { baseFields } from '../../common/utils/entity-defaults';
 import { newId, utcNow } from '../../common/utils/date.util';
 import { money } from '../../common/utils/money';
+import {
+  driverDocumentMediaUrl,
+  toDataUrlStoragePath,
+} from '../../common/utils/document-storage';
 import {
   documentTypeLabel,
   groupStatusLabel,
@@ -24,8 +29,6 @@ import {
   vehicleTypeLabel,
   verificationLabel,
 } from '../../common/utils/enums-map';
-import { writeFileSync, mkdirSync } from 'fs';
-import { join } from 'path';
 import { RidesService } from '../rides/rides.service';
 import { GroupsService } from '../groups/groups.service';
 
@@ -63,7 +66,7 @@ export class DriversService {
           id: d.id,
           documentType: documentTypeLabel(d.documentType),
           fileName: d.fileName,
-          url: `/uploads/${d.storagePath}`,
+          url: driverDocumentMediaUrl(d.id),
           createdAt: d.createdAt,
         })),
     };
@@ -78,33 +81,34 @@ export class DriversService {
     if (!file?.buffer?.length) {
       throw new AppException('الملف مطلوب');
     }
-    const dir = process.env.UPLOAD_DIR?.startsWith('/tmp')
-      ? process.env.UPLOAD_DIR
-      : join(process.cwd(), process.env.UPLOAD_DIR || 'uploads');
-    mkdirSync(dir, { recursive: true });
-    const stored = `${driver.id}-${Date.now()}-${file.originalname.replace(/[^\w.\-]/g, '_')}`;
-    writeFileSync(join(dir, stored), file.buffer);
+    const type = parseDocumentType(documentType);
     const doc = await this.prisma.driverDocument.create({
       data: {
         id: newId(),
         driverId: driver.id,
-        documentType: parseDocumentType(documentType),
+        documentType: type,
         fileName: file.originalname,
         contentType: file.mimetype || 'application/octet-stream',
         sizeBytes: BigInt(file.size),
-        storagePath: stored,
+        storagePath: toDataUrlStoragePath(file),
         notes: notes ?? null,
         uploadedBy: 'driver',
         ...baseFields(),
       },
     });
+    if (type === DriverDocumentType.PersonalPhoto) {
+      await this.prisma.user.update({
+        where: { id: driver.userId },
+        data: { avatarUrl: driverDocumentMediaUrl(doc.id), updatedAt: utcNow() },
+      });
+    }
     return {
       id: doc.id,
       documentType: documentTypeLabel(doc.documentType),
       fileName: doc.fileName,
       contentType: doc.contentType,
       sizeBytes: Number(doc.sizeBytes),
-      url: `/uploads/${doc.storagePath}`,
+      url: driverDocumentMediaUrl(doc.id),
       uploadedBy: doc.uploadedBy,
       notes: doc.notes,
       createdAt: doc.createdAt,
