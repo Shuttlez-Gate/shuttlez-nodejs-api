@@ -54,7 +54,11 @@ export function daysForScheduleType(
   if (value === 'daily') {
     return [...ALL_DAYS];
   }
-  return parseDaysOfWeek(daysOfWeek);
+  const selected = parseDaysOfWeek(daysOfWeek);
+  if (value === 'range' && selected.length === 0) {
+    return [...ALL_DAYS];
+  }
+  return selected;
 }
 
 export function occurrenceDates(input: {
@@ -75,7 +79,11 @@ export function occurrenceDates(input: {
       : [time.getUTCDay()];
 
   if (input.kind === RecurrenceKind.Weekly) {
-    return collectDates(time, addDays(startOfUtcDay(time), 8 * 7), days);
+    const from = input.rangeStart ? atTime(input.rangeStart, time) : time;
+    const until = input.rangeEnd
+      ? atTime(input.rangeEnd, time)
+      : addDays(startOfUtcDay(from), 8 * 7);
+    return collectDates(from, until, days);
   }
 
   const rangeStart = input.rangeStart ?? time;

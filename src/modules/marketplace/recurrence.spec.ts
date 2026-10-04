@@ -18,9 +18,14 @@ describe('recurrence', () => {
       kind: RecurrenceKind.Weekly,
       scheduledAt: at,
       daysOfWeek: daysForScheduleType('daily'),
+      rangeEnd: new Date('2026-10-18T00:00:00.000Z'),
     });
-    expect(dates.length).toBeGreaterThan(7);
+    expect(dates.length).toBe(15);
     expect(new Set(dates.map((d) => d.getUTCDay())).size).toBe(7);
+  });
+
+  it('range without selected days uses every day', () => {
+    expect(daysForScheduleType('range')).toEqual([0, 1, 2, 3, 4, 5, 6]);
   });
 
   it('generates a single occurrence for once', () => {

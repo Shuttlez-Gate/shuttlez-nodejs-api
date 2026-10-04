@@ -5,6 +5,8 @@ export type PlaceSuggestionDto = {
   placeId: string;
   description: string;
   subtitle?: string | null;
+  lat?: number | null;
+  lng?: number | null;
 };
 
 @Injectable()
@@ -24,6 +26,13 @@ export class PlacesService {
     return key;
   }
 
+  private hasGoogleKey(): boolean {
+    return Boolean(
+      this.config.get<string>('GOOGLE_MAPS_API_KEY')?.trim() ||
+        this.config.get<string>('GOOGLE_PLACES_API_KEY')?.trim(),
+    );
+  }
+
   async autocomplete(input: {
     query: string;
     language?: string;
@@ -33,6 +42,24 @@ export class PlacesService {
     const q = input.query.trim();
     if (q.length < 2) return [];
 
+    if (this.hasGoogleKey()) {
+      try {
+        const google = await this.googleAutocomplete(input);
+        if (google.length > 0) return google;
+      } catch {
+        // Fall through to OpenStreetMap so the admin can still pick a place.
+      }
+    }
+    return this.nominatimAutocomplete(q);
+  }
+
+  private async googleAutocomplete(input: {
+    query: string;
+    language?: string;
+    lat?: number;
+    lng?: number;
+  }): Promise<PlaceSuggestionDto[]> {
+    const q = input.query.trim();
     const params = new URLSearchParams({
       input: q,
       key: this.apiKey(),
@@ -60,11 +87,6 @@ export class PlacesService {
 
     const status = data.status ?? '';
     if (status === 'ZERO_RESULTS') return [];
-    if (status === 'REQUEST_DENIED' || status === 'OVER_QUERY_LIMIT') {
-      throw new ServiceUnavailableException(
-        data.error_message || `Places autocomplete denied (${status})`,
-      );
-    }
     if (status && status !== 'OK') {
       throw new ServiceUnavailableException(
         data.error_message || `Places autocomplete failed (${status})`,
@@ -92,6 +114,41 @@ export class PlacesService {
       .filter((x): x is PlaceSuggestionDto => x != null);
   }
 
+  private async nominatimAutocomplete(query: string): Promise<PlaceSuggestionDto[]> {
+    const params = new URLSearchParams({
+      format: 'jsonv2',
+      q: query,
+      countrycodes: 'eg',
+      limit: '8',
+      'accept-language': 'ar',
+    });
+    const res = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
+      headers: { 'User-Agent': 'ShuttlezAdmin/1.0 (admin.shuttlez.org)' },
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as Array<{
+      place_id?: number;
+      display_name?: string;
+      name?: string;
+      lat?: string;
+      lon?: string;
+    }>;
+    return (data ?? [])
+      .map((item): PlaceSuggestionDto | null => {
+        const lat = Number(item.lat);
+        const lng = Number(item.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+        return {
+          placeId: `nominatim:${item.place_id ?? `${lat},${lng}`}`,
+          description: item.name || item.display_name || query,
+          subtitle: item.display_name ?? null,
+          lat,
+          lng,
+        };
+      })
+      .filter((x): x is PlaceSuggestionDto => x != null);
+  }
+
   async details(placeId: string): Promise<{
     lat: number;
     lng: number;
@@ -99,6 +156,14 @@ export class PlacesService {
   } | null> {
     const id = placeId.trim();
     if (!id) return null;
+    if (
+      id.startsWith('nominatim:') ||
+      id.startsWith('photon:') ||
+      id.startsWith('local:')
+    ) {
+      return null;
+    }
+    if (!this.hasGoogleKey()) return null;
 
     const params = new URLSearchParams({
       place_id: id,
@@ -134,6 +199,21 @@ export class PlacesService {
     name: string | null;
   } | null> {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    if (this.hasGoogleKey()) {
+      try {
+        const google = await this.googleReverse(lat, lng);
+        if (google?.name) return google;
+      } catch {
+        // Fall through to OpenStreetMap.
+      }
+    }
+    return this.nominatimReverse(lat, lng);
+  }
+
+  private async googleReverse(
+    lat: number,
+    lng: number,
+  ): Promise<{ lat: number; lng: number; name: string | null } | null> {
     const params = new URLSearchParams({
       latlng: `${lat},${lng}`,
       key: this.apiKey(),
@@ -161,6 +241,31 @@ export class PlacesService {
       lat,
       lng,
       name: neighborhood || first?.formatted_address || null,
+    };
+  }
+
+  private async nominatimReverse(
+    lat: number,
+    lng: number,
+  ): Promise<{ lat: number; lng: number; name: string | null }> {
+    const params = new URLSearchParams({
+      format: 'jsonv2',
+      lat: String(lat),
+      lon: String(lng),
+      'accept-language': 'ar',
+    });
+    const res = await fetch(`https://nominatim.openstreetmap.org/reverse?${params}`, {
+      headers: { 'User-Agent': 'ShuttlezAdmin/1.0 (admin.shuttlez.org)' },
+    });
+    if (!res.ok) return { lat, lng, name: null };
+    const data = (await res.json()) as {
+      name?: string;
+      display_name?: string;
+    };
+    return {
+      lat,
+      lng,
+      name: data.name || data.display_name || null,
     };
   }
 

@@ -1129,6 +1129,7 @@ export class CaptainRoutesService {
       requested != null && Number.isFinite(requested) && requested > 0
         ? money(requested)
         : null;
+    const commissionRule = await this.fare.activeCommissionRule();
     const commissionPercent = await this.fare.platformCommissionPercent(null, vehicleType);
     const priced = seatPrice ?? suggestedSeatPrice ?? 0;
     const split = splitEarnings(priced > 0 ? priced : 0, commissionPercent);
@@ -1142,6 +1143,7 @@ export class CaptainRoutesService {
       commissionRate: split.commissionRate,
       commissionAmount: split.commissionAmount,
       captainEarning: split.captainEarnings,
+      commissionRuleName: commissionRule?.name ?? null,
     };
   }
 

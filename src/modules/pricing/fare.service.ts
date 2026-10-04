@@ -54,11 +54,28 @@ export class FareService {
       where: {
         isDeleted: false,
         isActive: true,
-        OR: [{ effectiveFrom: null }, { effectiveFrom: { lte: asOf } }],
+        AND: [
+          { OR: [{ effectiveFrom: null }, { effectiveFrom: { lte: asOf } }] },
+          { OR: [{ effectiveTo: null }, { effectiveTo: { gte: asOf } }] },
+        ],
       },
       orderBy: { createdAt: 'desc' },
     });
     return rule ? money(rule.platformCommissionPercent) : 0;
+  }
+
+  async activeCommissionRule(asOf = new Date()) {
+    return this.prisma.commissionRule.findFirst({
+      where: {
+        isDeleted: false,
+        isActive: true,
+        AND: [
+          { OR: [{ effectiveFrom: null }, { effectiveFrom: { lte: asOf } }] },
+          { OR: [{ effectiveTo: null }, { effectiveTo: { gte: asOf } }] },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   async resolveRideRule(fromZoneKey?: string | null, toZoneKey?: string | null) {
