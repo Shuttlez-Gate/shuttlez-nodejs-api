@@ -72,6 +72,17 @@ export class DriversController {
     return ApiResponse.ok(await this.drivers.publicProfile(id));
   }
 
+  @Post(':id/reviews')
+  async review(
+    @Param('id') id: string,
+    @Body() body: { tripId?: string; stars?: number; comment?: string },
+  ) {
+    return ApiResponse.ok(
+      await this.drivers.submitReview(id, body),
+      'تم حفظ التقييم',
+    );
+  }
+
   @Get('me/rides')
   async rides() {
     return ApiResponse.ok(await this.drivers.myRides());

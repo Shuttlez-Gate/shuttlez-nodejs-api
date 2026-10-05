@@ -26,7 +26,8 @@ export class SupportController {
       where: {
         userId,
         isDeleted: false,
-        status: tab === 'closed' ? 'closed' : { not: 'closed' },
+        status:
+          tab === 'closed' || tab === 'completed' ? 'closed' : { not: 'closed' },
       },
       orderBy: { createdAt: 'desc' },
     });

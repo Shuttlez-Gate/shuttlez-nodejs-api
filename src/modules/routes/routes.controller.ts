@@ -66,10 +66,14 @@ export class RoutesController {
     @Query('fromLongitude') fromLongitude?: string,
     @Query('toLatitude') toLatitude?: string,
     @Query('toLongitude') toLongitude?: string,
+    @Query('fromAddress') fromAddress?: string,
+    @Query('toAddress') toAddress?: string,
     @Query('date') date?: string,
     @Query('time') time?: string,
     @Query('passengers') passengers?: string,
     @Query('vehicleKind') vehicleKind?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
   ) {
     return ApiResponse.ok(
       await this.captainRoutes.listPublishedForRiders({
@@ -77,10 +81,14 @@ export class RoutesController {
         fromLongitude: optionalNumber(fromLongitude),
         toLatitude: optionalNumber(toLatitude),
         toLongitude: optionalNumber(toLongitude),
+        fromAddress,
+        toAddress,
         date,
         time,
         passengers: optionalNumber(passengers),
         vehicleKind,
+        page: optionalNumber(page),
+        pageSize: optionalNumber(pageSize),
       }),
     );
   }

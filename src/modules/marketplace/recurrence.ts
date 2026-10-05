@@ -1,7 +1,14 @@
 import { RecurrenceKind } from '../../common/enums';
 import { AppException } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/error-codes';
-import { addDays } from '../../common/utils/date.util';
+import {
+  addOperationalDays,
+  DEFAULT_OPERATIONAL_TIMEZONE,
+  enumerateOperationalSchedule,
+  getZonedParts,
+  operationalDayKey,
+  operationalWeekday,
+} from '../../common/utils/operational-clock';
 
 export const MAX_GENERATED_TRIPS = 60;
 
@@ -61,6 +68,11 @@ export function daysForScheduleType(
   return selected;
 }
 
+/**
+ * Expands a route template into bookable instants.
+ * Calendar days and weekdays are Africa/Cairo. The end date is included.
+ * The wall-clock time is the Cairo time of `scheduledAt`, copied onto each day.
+ */
 export function occurrenceDates(input: {
   kind: RecurrenceKind;
   scheduledAt: Date;
@@ -73,55 +85,38 @@ export function occurrenceDates(input: {
     return [time];
   }
 
+  const timeZone = DEFAULT_OPERATIONAL_TIMEZONE;
   const days =
     input.daysOfWeek && input.daysOfWeek.length > 0
       ? input.daysOfWeek
-      : [time.getUTCDay()];
+      : [operationalWeekday(time, timeZone)];
 
-  if (input.kind === RecurrenceKind.Weekly) {
-    const from = input.rangeStart ? atTime(input.rangeStart, time) : time;
-    const until = input.rangeEnd
-      ? atTime(input.rangeEnd, time)
-      : addDays(startOfUtcDay(from), 8 * 7);
-    return collectDates(from, until, days);
-  }
-
-  const rangeStart = input.rangeStart ?? time;
-  const rangeEnd = input.rangeEnd;
-  if (!rangeEnd || rangeEnd < rangeStart) {
-    throw new AppException(
-      'مدى التواريخ غير صالح',
-      400,
-      ErrorCodes.InvalidRecurrence,
-    );
-  }
-  return collectDates(atTime(rangeStart, time), atTime(rangeEnd, time), days);
-}
-
-function collectDates(from: Date, until: Date, daysOfWeek: number[]): Date[] {
-  const dates: Date[] = [];
-  let cursor = startOfUtcDay(from);
-  const end = startOfUtcDay(until);
-  const hours = from.getUTCHours();
-  const minutes = from.getUTCMinutes();
-  while (cursor.getTime() <= end.getTime() && dates.length < MAX_GENERATED_TRIPS) {
-    if (daysOfWeek.includes(cursor.getUTCDay())) {
-      dates.push(
-        new Date(
-          Date.UTC(
-            cursor.getUTCFullYear(),
-            cursor.getUTCMonth(),
-            cursor.getUTCDate(),
-            hours,
-            minutes,
-            0,
-            0,
-          ),
-        ),
+  const from =
+    input.kind === RecurrenceKind.Weekly
+      ? (input.rangeStart ?? time)
+      : (input.rangeStart ?? time);
+  let until = input.rangeEnd ?? null;
+  if (input.kind === RecurrenceKind.DateRange) {
+    if (!until || until.getTime() < from.getTime()) {
+      throw new AppException(
+        'مدى التواريخ غير صالح',
+        400,
+        ErrorCodes.InvalidRecurrence,
       );
     }
-    cursor = addDays(cursor, 1);
+  } else if (!until) {
+    until = addOperationalDays(from, 8 * 7, timeZone);
   }
+
+  const wall = getZonedParts(time, timeZone);
+  const clock = `${String(wall.hour).padStart(2, '0')}:${String(wall.minute).padStart(2, '0')}`;
+  const dates = enumerateOperationalSchedule({
+    startDate: operationalDayKey(from, timeZone),
+    endDate: operationalDayKey(until, timeZone),
+    times: [clock],
+    daysOfWeek: days,
+    timeZone,
+  }).slice(0, MAX_GENERATED_TRIPS);
   if (dates.length === 0) {
     throw new AppException(
       'لا توجد أيام مطابقة للتكرار',
@@ -130,24 +125,4 @@ function collectDates(from: Date, until: Date, daysOfWeek: number[]): Date[] {
     );
   }
   return dates;
-}
-
-function startOfUtcDay(date: Date): Date {
-  return new Date(
-    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
-  );
-}
-
-function atTime(date: Date, time: Date): Date {
-  return new Date(
-    Date.UTC(
-      date.getUTCFullYear(),
-      date.getUTCMonth(),
-      date.getUTCDate(),
-      time.getUTCHours(),
-      time.getUTCMinutes(),
-      0,
-      0,
-    ),
-  );
 }

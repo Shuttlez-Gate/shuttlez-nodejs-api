@@ -13,6 +13,7 @@ import { newId, utcNow } from '../../common/utils/date.util';
 import { money, refCode, requireCash, splitEarnings } from '../../common/utils/money';
 import { groupStatusLabel } from '../../common/utils/enums-map';
 import { FareService } from '../pricing/fare.service';
+import { isSelfOwnedTrip } from '../marketplace/self-booking';
 import { GroupGateway } from '../realtime/realtime.gateway';
 
 @Injectable()
@@ -172,6 +173,19 @@ export class GroupsService {
   async join(groupId: string, body?: GroupPickupInput) {
     const userId = this.currentUser.requireUserId();
     const group = await this.requireGroup(groupId);
+    if (group.driverId) {
+      const driver = await this.prisma.driver.findFirst({
+        where: { id: group.driverId, isDeleted: false },
+        select: { userId: true },
+      });
+      if (driver && isSelfOwnedTrip(userId, null, driver.userId)) {
+        throw new AppException(
+          'لا يمكنك حجز رحلتك',
+          400,
+          ErrorCodes.SelfBookingNotAllowed,
+        );
+      }
+    }
     const pickup = pickupFields(body);
     try {
       await this.prisma.$transaction(async (tx) => {

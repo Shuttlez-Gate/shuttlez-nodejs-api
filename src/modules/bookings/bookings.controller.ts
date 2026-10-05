@@ -37,6 +37,7 @@ import {
 import { closeElapsedHistory } from './close-elapsed-history';
 import { loadRiderHistoryPage } from './rider-history-page';
 import { riderHistoryBucket } from './rider-history-bucket';
+import { isSelfOwnedTrip, tripsNotOwnedByViewer } from '../marketplace/self-booking';
 
 @ApiTags('bookings')
 @Controller('api/v1/bookings')
@@ -61,6 +62,8 @@ export class BookingsController {
   ) {
     const now = utcNow();
     const until = addDays(now, 7);
+    const viewerId = this.currentUser.userId;
+    const notOwn = viewerId ? tripsNotOwnedByViewer(viewerId) : {};
 
     const originLat = optionalCoord(sourceLatitude);
     const originLng = optionalCoord(sourceLongitude);
@@ -79,6 +82,7 @@ export class BookingsController {
           isDeleted: false,
           ownerType: RouteOwnerType.Platform,
         },
+        ...notOwn,
       },
       include: { route: { include: { stops: { where: { isDeleted: false } } } } },
       orderBy: { scheduledAt: 'asc' },
@@ -97,6 +101,7 @@ export class BookingsController {
               ownerType: RouteOwnerType.Captain,
               publishStatus: RoutePublishStatus.Published,
             },
+            ...notOwn,
           },
           include: {
             route: {
@@ -295,7 +300,10 @@ export class BookingsController {
       where: { id: body.tripId, isDeleted: false },
       include: {
         route: {
-          include: { stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } } },
+          include: {
+            stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
+            ownerDriver: { select: { userId: true } },
+          },
         },
         driver: true,
       },
@@ -319,6 +327,19 @@ export class BookingsController {
     });
     if (existing) {
       throw new AppException('لديك حجز على هذه الرحلة بالفعل', 400, ErrorCodes.DuplicateBooking);
+    }
+    if (
+      isSelfOwnedTrip(
+        userId,
+        trip.route.ownerDriver?.userId,
+        trip.driver?.userId,
+      )
+    ) {
+      throw new AppException(
+        'لا يمكنك حجز رحلتك',
+        400,
+        ErrorCodes.SelfBookingNotAllowed,
+      );
     }
     if (await this.hasOverlappingBooking(userId, trip.id, trip.scheduledAt, trip.route.durationSeconds)) {
       throw new AppException(
@@ -365,6 +386,27 @@ export class BookingsController {
 
     await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${trip.id}))`;
+      const fresh = await tx.trip.findFirst({
+        where: { id: trip.id, isDeleted: false },
+        select: {
+          driver: { select: { userId: true } },
+          route: { select: { ownerDriver: { select: { userId: true } } } },
+        },
+      });
+      if (
+        fresh &&
+        isSelfOwnedTrip(
+          userId,
+          fresh.route.ownerDriver?.userId,
+          fresh.driver?.userId,
+        )
+      ) {
+        throw new AppException(
+          'لا يمكنك حجز رحلتك',
+          400,
+          ErrorCodes.SelfBookingNotAllowed,
+        );
+      }
       if (isCaptain && origin && destination) {
         await this.segments.tryDecrementRange(
           tx,
@@ -781,6 +823,15 @@ export class SubscriptionPackagesController {
 
   @Get()
   async packages() {
+    const userId = this.currentUser.userId;
+    let activeId: string | null = null;
+    if (userId) {
+      const user = await this.prisma.user.findFirst({
+        where: { id: userId, isDeleted: false },
+        select: { activeSubscriptionPackageId: true },
+      });
+      activeId = user?.activeSubscriptionPackageId ?? null;
+    }
     const items = await this.prisma.subscriptionPackage.findMany({
       where: { isActive: true, isDeleted: false },
       orderBy: { price: 'asc' },
@@ -789,10 +840,12 @@ export class SubscriptionPackagesController {
       items.map((p) => ({
         id: p.id,
         name: p.name,
+        title: p.name,
         description: p.description,
         price: money(p.price),
         tripCount: p.tripCount,
         validityDays: p.validityDays,
+        isCurrent: activeId != null && p.id === activeId,
       })),
     );
   }

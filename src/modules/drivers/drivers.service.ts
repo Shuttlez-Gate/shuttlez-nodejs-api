@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { CurrentUserService } from '../../common/current-user.service';
 import {
@@ -173,76 +174,141 @@ export class DriversService {
 
   async publicProfile(driverId: string) {
     this.currentUser.requireUserId();
+    if (!isUuid(driverId)) {
+      throw new NotFoundException('الكابتن غير موجود');
+    }
+    const rows = await this.prisma.$queryRaw<ProfileRow[]>`
+      SELECT
+        d."Id" AS id,
+        d."CreatedAt" AS "createdAt",
+        d."VerificationStatus" AS "verificationStatus",
+        d."VehicleKind" AS "vehicleKind",
+        d."VehicleModelName" AS "vehicleModelName",
+        d."VehicleColor" AS "vehicleColor",
+        d."PlateNumber" AS "plateNumber",
+        u."FullName" AS "fullName",
+        u."AvatarUrl" AS "avatarUrl",
+        v."Model" AS "vehicleModelFallback",
+        v."PlateNumber" AS "plateFallback",
+        (
+          SELECT COUNT(*)::int FROM "TripsSet" t
+          WHERE t."DriverId" = d."Id" AND t."IsDeleted" = false
+            AND t."Status" = ${TripStatus.Completed}
+        ) AS "completedTrips",
+        (
+          SELECT COUNT(*)::int FROM "RideRequestsSet" r
+          WHERE r."DriverId" = d."Id" AND r."IsDeleted" = false
+            AND r."Status" = ${RideRequestStatus.Completed}
+        ) AS "completedRides",
+        (
+          SELECT COUNT(*)::int FROM "GroupRequestsSet" g
+          WHERE g."DriverId" = d."Id" AND g."IsDeleted" = false
+            AND g."Status" = ${GroupRequestStatus.Completed}
+        ) AS "completedGroups",
+        (
+          SELECT COUNT(*)::int FROM "ReviewsSet" rv
+          WHERE rv."DriverId" = d."Id" AND rv."IsDeleted" = false
+        ) AS "ratingCount",
+        (
+          SELECT AVG(rv."Stars")::float FROM "ReviewsSet" rv
+          WHERE rv."DriverId" = d."Id" AND rv."IsDeleted" = false
+        ) AS "ratingAverage",
+        (
+          SELECT COALESCE(json_agg(item), '[]'::json) FROM (
+            SELECT rv."Id" AS id, rv."Stars" AS stars, rv."Comment" AS comment,
+                   rv."CreatedAt" AS "createdAt"
+            FROM "ReviewsSet" rv
+            WHERE rv."DriverId" = d."Id" AND rv."IsDeleted" = false
+            ORDER BY rv."CreatedAt" DESC
+            LIMIT 40
+          ) item
+        ) AS reviews
+      FROM "DriversSet" d
+      INNER JOIN "UsersSet" u ON u."Id" = d."UserId"
+      LEFT JOIN "VehiclesSet" v ON v."Id" = d."VehicleId"
+      WHERE d."Id" = CAST(${driverId} AS uuid) AND d."IsDeleted" = false
+    `;
+    const driver = rows[0];
+    if (!driver) {
+      throw new NotFoundException('الكابتن غير موجود');
+    }
+    const ratingCount = Number(driver.ratingCount ?? 0);
+    const reviews = parseReviews(driver.reviews);
+    return {
+      id: driver.id,
+      fullName: driver.fullName?.trim() || '',
+      avatarUrl: driver.avatarUrl,
+      verified: Number(driver.verificationStatus) === DriverVerificationStatus.Approved,
+      ratingAverage: ratingCount > 0 ? money(driver.ratingAverage) : null,
+      ratingCount,
+      yearsOfService: fullYearsSince(new Date(driver.createdAt)),
+      completedTrips:
+        Number(driver.completedTrips ?? 0) +
+        Number(driver.completedRides ?? 0) +
+        Number(driver.completedGroups ?? 0),
+      vehicleKind: driver.vehicleKind,
+      vehicleModel: driver.vehicleModelName ?? driver.vehicleModelFallback ?? null,
+      vehicleColor: driver.vehicleColor,
+      plateNumber: driver.plateNumber ?? driver.plateFallback ?? null,
+      reviews,
+    };
+  }
+
+  async submitReview(
+    driverId: string,
+    body: { tripId?: string; stars?: number; comment?: string },
+  ) {
+    const userId = this.currentUser.requireUserId();
+    const tripId = body.tripId?.trim() ?? '';
+    const stars = Math.round(Number(body.stars));
+    if (!isUuid(driverId)) {
+      throw new NotFoundException('الكابتن غير موجود');
+    }
+    if (!isUuid(tripId) || stars < 1 || stars > 5) {
+      throw new AppException('اختر عدد النجوم أولاً');
+    }
     const driver = await this.prisma.driver.findFirst({
       where: { id: driverId, isDeleted: false },
-      select: {
-        id: true,
-        createdAt: true,
-        ratingAverage: true,
-        ratingCount: true,
-        verificationStatus: true,
-        vehicleKind: true,
-        vehicleModelName: true,
-        vehicleColor: true,
-        plateNumber: true,
-        user: { select: { fullName: true, avatarUrl: true } },
-        vehicle: { select: { model: true, plateNumber: true, type: true } },
-      },
+      select: { id: true, userId: true },
     });
     if (!driver) {
       throw new NotFoundException('الكابتن غير موجود');
     }
-    const [completedTrips, completedRides, completedGroups, reviews] =
-      await Promise.all([
-        this.prisma.trip.count({
-          where: {
+    if (driver.userId === userId) {
+      throw new AppException('لا يمكن تقييم حسابك');
+    }
+    const comment = body.comment?.trim() || null;
+    const summary = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.review.findFirst({
+        where: { userId, tripId, isDeleted: false },
+        select: { id: true, driverId: true },
+      });
+      if (existing) {
+        await tx.review.update({
+          where: { id: existing.id },
+          data: { stars, comment, driverId: driver.id, updatedAt: utcNow() },
+        });
+      } else {
+        await tx.review.create({
+          data: {
+            id: newId(),
+            tripId,
+            userId,
             driverId: driver.id,
-            isDeleted: false,
-            status: TripStatus.Completed,
+            stars,
+            comment,
+            ...baseFields(),
           },
-        }),
-        this.prisma.rideRequest.count({
-          where: {
-            driverId: driver.id,
-            isDeleted: false,
-            status: RideRequestStatus.Completed,
-          },
-        }),
-        this.prisma.groupRequest.count({
-          where: {
-            driverId: driver.id,
-            isDeleted: false,
-            status: GroupRequestStatus.Completed,
-          },
-        }),
-        this.prisma.review.findMany({
-          where: { driverId: driver.id, isDeleted: false },
-          orderBy: { createdAt: 'desc' },
-          take: 40,
-          select: { id: true, stars: true, comment: true, createdAt: true },
-        }),
-      ]);
-    const ratingCount = driver.ratingCount ?? 0;
-    return {
-      id: driver.id,
-      fullName: driver.user.fullName?.trim() || '',
-      avatarUrl: driver.user.avatarUrl,
-      verified: driver.verificationStatus === DriverVerificationStatus.Approved,
-      ratingAverage: ratingCount > 0 ? money(driver.ratingAverage) : null,
-      ratingCount,
-      yearsOfService: fullYearsSince(driver.createdAt),
-      completedTrips: completedTrips + completedRides + completedGroups,
-      vehicleKind: driver.vehicleKind,
-      vehicleModel: driver.vehicleModelName ?? driver.vehicle?.model ?? null,
-      vehicleColor: driver.vehicleColor,
-      plateNumber: driver.plateNumber ?? driver.vehicle?.plateNumber ?? null,
-      reviews: reviews.map((review) => ({
-        id: review.id,
-        stars: review.stars,
-        comment: review.comment?.trim() || null,
-        createdAt: review.createdAt,
-      })),
-    };
+        });
+      }
+      const previousDriverId = existing?.driverId;
+      if (previousDriverId && previousDriverId !== driver.id) {
+        await refreshDriverRating(tx, previousDriverId);
+      }
+      const summary = await refreshDriverRating(tx, driver.id);
+      return { ...summary, stars };
+    });
+    return summary;
   }
 
   async ratings() {
@@ -530,6 +596,73 @@ export class DriversService {
     }
     return driver;
   }
+}
+
+type ProfileRow = {
+  id: string;
+  createdAt: Date | string;
+  verificationStatus: number;
+  vehicleKind: string | null;
+  vehicleModelName: string | null;
+  vehicleColor: string | null;
+  plateNumber: string | null;
+  fullName: string | null;
+  avatarUrl: string | null;
+  vehicleModelFallback: string | null;
+  plateFallback: string | null;
+  completedTrips: number;
+  completedRides: number;
+  completedGroups: number;
+  ratingCount: number;
+  ratingAverage: number | null;
+  reviews: unknown;
+};
+
+function parseReviews(value: unknown) {
+  const rows = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? (JSON.parse(value) as unknown[])
+      : [];
+  return rows.map((row) => {
+    const review = row as {
+      id?: string;
+      stars?: number;
+      comment?: string | null;
+      createdAt?: string;
+    };
+    return {
+      id: review.id ?? '',
+      stars: Number(review.stars ?? 0),
+      comment: review.comment?.trim() || null,
+      createdAt: review.createdAt ?? null,
+    };
+  });
+}
+
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value: string): boolean {
+  return uuidPattern.test(value);
+}
+
+async function refreshDriverRating(
+  tx: Prisma.TransactionClient,
+  driverId: string,
+) {
+  const aggregate = await tx.review.aggregate({
+    where: { driverId, isDeleted: false },
+    _avg: { stars: true },
+    _count: { _all: true },
+  });
+  const ratingCount = aggregate._count._all;
+  const ratingAverage = Number(aggregate._avg.stars ?? 0);
+  await tx.driver.update({
+    where: { id: driverId },
+    data: { ratingAverage, ratingCount, updatedAt: utcNow() },
+  });
+  return { ratingAverage, ratingCount };
 }
 
 function fullYearsSince(from: Date, now = new Date()): number {

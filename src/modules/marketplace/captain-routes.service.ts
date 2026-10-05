@@ -21,6 +21,13 @@ import {
 } from '../../common/enums';
 import { baseFields } from '../../common/utils/entity-defaults';
 import { newId, utcNow } from '../../common/utils/date.util';
+import {
+  addOperationalDays,
+  DEFAULT_OPERATIONAL_TIMEZONE,
+  getZonedParts,
+  operationalDayBounds,
+  startOfOperationalDay,
+} from '../../common/utils/operational-clock';
 import { driverDocumentMediaUrl } from '../../common/utils/document-storage';
 import { money, refCode, splitEarnings } from '../../common/utils/money';
 import { pageRequestFrom, PagedResult } from '../../common/paged-result';
@@ -37,6 +44,8 @@ import {
   remainingForRange,
   type OrderedStop,
 } from './segment-occupancy';
+import { journeyRequested, matchRouteToJourney } from './route-match';
+import { captainRoutesNotOwnedBy, isSelfOwnedTrip } from './self-booking';
 import {
   daysForScheduleType,
   daysOfWeekCsv,
@@ -82,10 +91,14 @@ export type PassengerSearchQuery = {
   fromLongitude?: number | null;
   toLatitude?: number | null;
   toLongitude?: number | null;
+  fromAddress?: string | null;
+  toAddress?: string | null;
   date?: string | null;
   time?: string | null;
   passengers?: number | null;
   vehicleKind?: string | null;
+  page?: number | null;
+  pageSize?: number | null;
 };
 
 @Injectable()
@@ -365,13 +378,23 @@ export class CaptainRoutesService {
     const days = daysForScheduleType(body.scheduleType ?? body.recurrenceKind, body.daysOfWeek);
     const rangeStart = body.rangeStart ? new Date(body.rangeStart) : null;
     const rangeEnd = body.rangeEnd ? new Date(body.rangeEnd) : null;
-    const dates = occurrenceDates({
+    const expanded = occurrenceDates({
       kind,
       scheduledAt,
       daysOfWeek: days,
       rangeStart,
       rangeEnd,
     });
+    const existing = await this.prisma.trip.findMany({
+      where: {
+        routeId: route.id,
+        isDeleted: false,
+        status: { not: TripStatus.Cancelled },
+      },
+      select: { scheduledAt: true },
+    });
+    const taken = new Set(existing.map((trip) => instanceKey(trip.scheduledAt)));
+    const dates = expanded.filter((date) => !taken.has(instanceKey(date)));
     const capacity =
       body.availableSeats ?? route.capacity ?? this.resolveCapacity(undefined, driver, route.vehicleKind);
     const price = Number(body.pricePerSeat);
@@ -634,11 +657,15 @@ export class CaptainRoutesService {
       },
       include: {
         stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
+        ownerDriver: { select: { userId: true } },
         trips: {
           where: {
             isDeleted: false,
             status: { in: [TripStatus.Scheduled, TripStatus.DriverAssigned] },
             scheduledAt: { gte: utcNow() },
+            ...(this.currentUser.userId
+              ? { NOT: { driver: { userId: this.currentUser.userId } } }
+              : {}),
           },
           include: { segmentInventories: { where: { isDeleted: false } } },
           orderBy: { scheduledAt: 'asc' },
@@ -648,6 +675,17 @@ export class CaptainRoutesService {
     });
     if (!route) {
       throw new NotFoundException('المسار غير موجود', ErrorCodes.RouteNotFound);
+    }
+    const viewerId = this.currentUser.userId;
+    if (
+      viewerId &&
+      isSelfOwnedTrip(viewerId, route.ownerDriver?.userId ?? null, null)
+    ) {
+      throw new AppException(
+        'لا يمكنك حجز رحلتك',
+        400,
+        ErrorCodes.SelfBookingNotAllowed,
+      );
     }
     return {
       id: route.id,
@@ -684,20 +722,30 @@ export class CaptainRoutesService {
   async searchPublished(query: PassengerSearchQuery = {}) {
     const now = utcNow();
     const passengers = query.passengers && query.passengers > 0 ? query.passengers : 1;
-    const hasCoords =
-      query.fromLatitude != null &&
-      query.fromLongitude != null &&
-      query.toLatitude != null &&
-      query.toLongitude != null;
     const dateKey = query.date?.trim() || null;
     const time = query.time?.trim() || null;
+    const requested = journeyRequested(query);
+    const tripWindow = searchTripWindow(dateKey, now);
+    const tripWhere = {
+      isDeleted: false,
+      status: { in: [TripStatus.Scheduled, TripStatus.DriverAssigned] },
+      scheduledAt: tripWindow,
+    };
 
+    const viewerId = this.currentUser.userId;
     const routes = await this.prisma.route.findMany({
       where: {
         isDeleted: false,
         isActive: true,
         ownerType: RouteOwnerType.Captain,
         publishStatus: RoutePublishStatus.Published,
+        ...(viewerId ? captainRoutesNotOwnedBy(viewerId) : {}),
+        trips: {
+          some: {
+            ...tripWhere,
+            ...(viewerId ? { NOT: { driver: { userId: viewerId } } } : {}),
+          },
+        },
       },
       include: {
         stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
@@ -719,13 +767,12 @@ export class CaptainRoutesService {
         },
         trips: {
           where: {
-            isDeleted: false,
-            status: { in: [TripStatus.Scheduled, TripStatus.DriverAssigned] },
-            scheduledAt: { gte: now },
+            ...tripWhere,
+            ...(viewerId ? { NOT: { driver: { userId: viewerId } } } : {}),
           },
           include: { segmentInventories: { where: { isDeleted: false } } },
           orderBy: { scheduledAt: 'asc' },
-          take: 20,
+          take: 30,
         },
       },
       orderBy: { updatedAt: 'desc' },
@@ -742,29 +789,14 @@ export class CaptainRoutesService {
         continue;
       }
 
-      let origin: { id: string; name: string; order: number } = stops[0];
-      let destination: { id: string; name: string; order: number } = stops[stops.length - 1];
-      if (hasCoords) {
-        const match = matchOriginDestination(
-          stops,
-          query.fromLatitude!,
-          query.fromLongitude!,
-          query.toLatitude!,
-          query.toLongitude!,
-        );
-        if (!match) continue;
-        origin = match.origin;
-        destination = match.destination;
-      }
+      const matched = requested ? matchRouteToJourney(stops, query) : null;
+      if (requested && !matched) continue;
+      const origin = matched?.origin ?? stops[0];
+      const destination = matched?.destination ?? stops[stops.length - 1];
 
       const matchingTrips = route.trips.filter((trip) => {
         if (dateKey && cairoDateKey(trip.scheduledAt) !== dateKey) return false;
-        if (time) {
-          const hm = `${String(trip.scheduledAt.getUTCHours()).padStart(2, '0')}:${String(
-            trip.scheduledAt.getUTCMinutes(),
-          ).padStart(2, '0')}`;
-          if (hm !== time) return false;
-        }
+        if (time && cairoClock(trip.scheduledAt) !== time) return false;
         const remaining = remainingForRange(
           trip.segmentInventories,
           origin.order,
@@ -772,12 +804,7 @@ export class CaptainRoutesService {
         );
         return remaining >= passengers;
       });
-      if (dateKey && matchingTrips.length === 0) continue;
-      const nextTrip = matchingTrips[0] ?? route.trips[0] ?? null;
-      const remainingSeats = nextTrip
-        ? remainingForRange(nextTrip.segmentInventories, origin.order, destination.order)
-        : 0;
-      if (hasCoords && remainingSeats < passengers) continue;
+      if (matchingTrips.length === 0) continue;
 
       const driver = route.ownerDriver;
       const ratingCount = driver?.ratingCount ?? 0;
@@ -794,66 +821,74 @@ export class CaptainRoutesService {
       const vehiclePhotoUrl = vehicleFront
         ? driverDocumentMediaUrl(vehicleFront.id)
         : null;
-      results.push({
-        id: route.id,
-        captainRouteId: route.id,
-        name: route.name,
-        description: route.description,
-        vehicleKind: route.vehicleKind ?? (driver ? captainVehicleKind(driver) : null),
-        vehicle: {
-          id: driver?.vehicleId ?? null,
-          type: route.vehicleKind ?? (driver ? captainVehicleKind(driver) : null),
-          plateNumber: driver?.plateNumber ?? driver?.vehicle?.plateNumber ?? null,
-          capacity: route.capacity ?? driver?.seats ?? driver?.vehicle?.capacity ?? null,
-        },
-        capacity: route.capacity,
-        shareToken: route.shareToken,
-        badgeVariant: 'captain' as const,
-        status: captainRouteLifecycle({
-          publishStatus: route.publishStatus,
-          isActive: route.isActive,
-          nextTripAt: nextTrip?.scheduledAt ?? null,
-          now,
-        }),
-        stops: stops.map((stop) => ({
-          id: stop.id,
-          name: stop.name,
-          ...publicStopCoords(stop),
-          order: stop.order,
-        })),
-        stopsCount: stops.length,
-        origin: origin.name,
-        destination: destination.name,
-        fromStop: origin.name,
-        toStop: destination.name,
-        originStopId: origin.id,
-        destinationStopId: destination.id,
-        remainingSeats,
-        availableSeats: remainingSeats,
-        nextTripAt: nextTrip?.scheduledAt ?? null,
-        departureTime: nextTrip?.scheduledAt ?? null,
-        pricePerSeat: nextTrip ? money(nextTrip.pricePerSeat) : null,
-        hasAvailableSeats: remainingSeats > 0,
-        nextTripId: nextTrip?.id ?? null,
-        bookedByMe: false,
-        captain: driver
-          ? {
-              id: driver.id,
-              name: driver.user.fullName,
-              photoUrl: captainPhotoUrl,
-              phone: driver.user.phone,
-              isActive: driver.isActive,
-            }
-          : null,
-        captainName: driver?.user.fullName ?? null,
-        captainPhotoUrl,
-        vehiclePhotoUrl,
-        captainRatingAverage:
-          ratingCount > 0 && driver ? money(driver.ratingAverage) : null,
-        captainRatingCount: ratingCount,
-        recurrenceKind: nextTrip?.recurrenceKind ?? null,
-        recurrenceDays: nextTrip?.recurrenceDaysOfWeek ?? null,
-      });
+      for (const nextTrip of matchingTrips) {
+        const remainingSeats = remainingForRange(
+          nextTrip.segmentInventories,
+          origin.order,
+          destination.order,
+        );
+        results.push({
+          id: route.id,
+          captainRouteId: route.id,
+          name: route.name,
+          description: route.description,
+          vehicleKind: route.vehicleKind ?? (driver ? captainVehicleKind(driver) : null),
+          vehicle: {
+            id: driver?.vehicleId ?? null,
+            type: route.vehicleKind ?? (driver ? captainVehicleKind(driver) : null),
+            plateNumber: driver?.plateNumber ?? driver?.vehicle?.plateNumber ?? null,
+            capacity: route.capacity ?? driver?.seats ?? driver?.vehicle?.capacity ?? null,
+          },
+          capacity: route.capacity,
+          shareToken: route.shareToken,
+          badgeVariant: 'captain' as const,
+          status: captainRouteLifecycle({
+            publishStatus: route.publishStatus,
+            isActive: route.isActive,
+            nextTripAt: nextTrip.scheduledAt,
+            now,
+          }),
+          stops: stops.map((stop) => ({
+            id: stop.id,
+            name: stop.name,
+            ...publicStopCoords(stop),
+            order: stop.order,
+          })),
+          stopsCount: stops.length,
+          origin: origin.name,
+          destination: destination.name,
+          fromStop: origin.name,
+          toStop: destination.name,
+          originStopId: origin.id,
+          destinationStopId: destination.id,
+          remainingSeats,
+          availableSeats: remainingSeats,
+          nextTripAt: nextTrip.scheduledAt,
+          departureTime: nextTrip.scheduledAt,
+          pricePerSeat: money(nextTrip.pricePerSeat),
+          hasAvailableSeats: remainingSeats > 0,
+          nextTripId: nextTrip.id,
+          bookedByMe: false,
+          captain: driver
+            ? {
+                id: driver.id,
+                name: driver.user.fullName,
+                photoUrl: captainPhotoUrl,
+                phone: driver.user.phone,
+                isActive: driver.isActive,
+              }
+            : null,
+          captainName: driver?.user.fullName ?? null,
+          ownerUserId: driver?.userId ?? null,
+          captainPhotoUrl,
+          vehiclePhotoUrl,
+          captainRatingAverage:
+            ratingCount > 0 && driver ? money(driver.ratingAverage) : null,
+          captainRatingCount: ratingCount,
+          recurrenceKind: nextTrip.recurrenceKind ?? null,
+          recurrenceDays: nextTrip.recurrenceDaysOfWeek ?? null,
+        });
+      }
     }
     const userId = this.currentUser.userId;
     if (userId) {
@@ -876,7 +911,16 @@ export class CaptainRoutesService {
         }
       }
     }
-    return results;
+    results.sort(
+      (a, b) => a.nextTripAt.getTime() - b.nextTripAt.getTime(),
+    );
+    const page = query.page && query.page > 0 ? Math.floor(query.page) : 1;
+    const pageSize = Math.min(
+      50,
+      query.pageSize && query.pageSize > 0 ? Math.floor(query.pageSize) : 50,
+    );
+    const start = (page - 1) * pageSize;
+    return results.slice(start, start + pageSize);
   }
 
   async adminList(query: {
@@ -1769,6 +1813,27 @@ function stopsMin(stops: Array<{ order: number }>): number {
 
 function stopsMax(stops: Array<{ order: number }>): number {
   return Math.max(...stops.map((s) => s.order));
+}
+
+function searchTripWindow(dateKey: string | null, now: Date): { gte: Date; lt: Date } {
+  if (dateKey && /^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+    const bounds = operationalDayBounds(dateKey, DEFAULT_OPERATIONAL_TIMEZONE);
+    if (bounds) return { gte: bounds.start, lt: bounds.end };
+  }
+  const start = startOfOperationalDay(now, DEFAULT_OPERATIONAL_TIMEZONE);
+  return {
+    gte: now,
+    lt: addOperationalDays(start, 8, DEFAULT_OPERATIONAL_TIMEZONE),
+  };
+}
+
+function instanceKey(date: Date): string {
+  return `${cairoDateKey(date)} ${cairoClock(date)}`;
+}
+
+function cairoClock(date: Date): string {
+  const parts = getZonedParts(date, DEFAULT_OPERATIONAL_TIMEZONE);
+  return `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`;
 }
 
 function cairoDateKey(date: Date): string {

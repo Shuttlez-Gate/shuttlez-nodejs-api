@@ -8,7 +8,7 @@ import {
 } from '@nestjs/platform-express';
 import { isAbsolute, join } from 'path';
 import { existsSync, mkdirSync } from 'fs';
-import type { Express } from 'express';
+import { json, urlencoded, type Express } from 'express';
 import { AppModule } from './app.module';
 import { driverTripsRateLimit } from './common/middleware/driver-trips-rate-limit';
 import { resolveOperationalTimeZone } from './common/utils/operational-clock';
@@ -77,8 +77,13 @@ export async function createNestApp(
     ? await NestFactory.create<NestExpressApplication>(
         AppModule,
         new ExpressAdapter(expressInstance),
+        { bodyParser: false },
       )
-    : await NestFactory.create<NestExpressApplication>(AppModule);
+    : await NestFactory.create<NestExpressApplication>(AppModule, {
+        bodyParser: false,
+      });
+  app.use(json({ limit: '2mb' }));
+  app.use(urlencoded({ extended: true, limit: '2mb' }));
 
   const config = app.get(ConfigService);
   logOperationalTimeZone(config);

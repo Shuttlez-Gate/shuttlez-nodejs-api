@@ -1,5 +1,8 @@
 import { RecurrenceKind } from '../../common/enums';
+import { getZonedParts, operationalWeekday, zonedWallTimeToUtc } from '../../common/utils/operational-clock';
+import { cairoDateKey } from '../bookings/rider-history-bucket';
 import { occurrenceDates, parseDaysOfWeek, parseRecurrenceKind, daysForScheduleType } from './recurrence';
+import { instancesOnDate } from './route-match';
 
 describe('recurrence', () => {
   it('parses kind aliases', () => {
@@ -9,6 +12,32 @@ describe('recurrence', () => {
     expect(parseRecurrenceKind('daily')).toBe(RecurrenceKind.Weekly);
     expect(parseRecurrenceKind('specific-days')).toBe(RecurrenceKind.Weekly);
     expect(parseRecurrenceKind('range')).toBe(RecurrenceKind.DateRange);
+  });
+
+  it('daily Oct 5 through Oct 10 includes the end date in Cairo', () => {
+    const at = zonedWallTimeToUtc(2026, 10, 5, 0, 30, 0, 'Africa/Cairo');
+    const end = zonedWallTimeToUtc(2026, 10, 10, 0, 30, 0, 'Africa/Cairo');
+    const dates = occurrenceDates({
+      kind: RecurrenceKind.Weekly,
+      scheduledAt: at,
+      daysOfWeek: daysForScheduleType('daily'),
+      rangeEnd: end,
+    });
+    expect(dates.map((date) => cairoDateKey(date))).toEqual([
+      '2026-10-05',
+      '2026-10-06',
+      '2026-10-07',
+      '2026-10-08',
+      '2026-10-09',
+      '2026-10-10',
+    ]);
+    const trips = dates.map((scheduledAt, index) => ({
+      id: `trip-${index}`,
+      scheduledAt,
+    }));
+    const onSeventh = instancesOnDate(trips, '2026-10-07');
+    expect(onSeventh.map((trip) => cairoDateKey(trip.scheduledAt))).toEqual(['2026-10-07']);
+    expect(onSeventh.map((trip) => trip.id)).not.toContain('trip-0');
   });
 
   it('daily expands to every weekday', () => {
@@ -44,9 +73,15 @@ describe('recurrence', () => {
     });
     expect(dates.length).toBeGreaterThan(0);
     expect(dates.length).toBeLessThanOrEqual(60);
-    expect(dates.every((d) => d.getUTCHours() === 8 && d.getUTCMinutes() === 30)).toBe(
+    const wall = getZonedParts(at, 'Africa/Cairo');
+    expect(
+      dates.every((date) => {
+        const parts = getZonedParts(date, 'Africa/Cairo');
+        return parts.hour === wall.hour && parts.minute === wall.minute;
+      }),
+    ).toBe(true);
+    expect(dates.every((date) => [1, 3].includes(operationalWeekday(date, 'Africa/Cairo')))).toBe(
       true,
     );
-    expect(dates.every((d) => [1, 3].includes(d.getUTCDay()))).toBe(true);
   });
 });
