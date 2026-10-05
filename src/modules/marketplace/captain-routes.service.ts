@@ -11,6 +11,7 @@ import { ErrorCodes } from '../../common/error-codes';
 import {
   BookingStatus,
   CancellationRequestStatus,
+  DriverDocumentType,
   DriverVerificationStatus,
   RecurrenceKind,
   RouteOwnerType,
@@ -20,6 +21,7 @@ import {
 } from '../../common/enums';
 import { baseFields } from '../../common/utils/entity-defaults';
 import { newId, utcNow } from '../../common/utils/date.util';
+import { driverDocumentMediaUrl } from '../../common/utils/document-storage';
 import { money, refCode, splitEarnings } from '../../common/utils/money';
 import { pageRequestFrom, PagedResult } from '../../common/paged-result';
 import {
@@ -699,7 +701,22 @@ export class CaptainRoutesService {
       },
       include: {
         stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
-        ownerDriver: { include: { user: true, vehicle: true } },
+        ownerDriver: {
+          include: {
+            user: true,
+            vehicle: true,
+            documents: {
+              where: {
+                isDeleted: false,
+                documentType: {
+                  in: [DriverDocumentType.PersonalPhoto, DriverDocumentType.VehicleFront],
+                },
+              },
+              select: { id: true, documentType: true, createdAt: true },
+              orderBy: { createdAt: 'desc' },
+            },
+          },
+        },
         trips: {
           where: {
             isDeleted: false,
@@ -764,6 +781,19 @@ export class CaptainRoutesService {
 
       const driver = route.ownerDriver;
       const ratingCount = driver?.ratingCount ?? 0;
+      const docs = driver?.documents ?? [];
+      const personal = docs.find(
+        (doc) => doc.documentType === DriverDocumentType.PersonalPhoto,
+      );
+      const vehicleFront = docs.find(
+        (doc) => doc.documentType === DriverDocumentType.VehicleFront,
+      );
+      const captainPhotoUrl =
+        driver?.user.avatarUrl?.trim() ||
+        (personal ? driverDocumentMediaUrl(personal.id) : null);
+      const vehiclePhotoUrl = vehicleFront
+        ? driverDocumentMediaUrl(vehicleFront.id)
+        : null;
       results.push({
         id: route.id,
         captainRouteId: route.id,
@@ -810,13 +840,14 @@ export class CaptainRoutesService {
           ? {
               id: driver.id,
               name: driver.user.fullName,
-              photoUrl: driver.user.avatarUrl,
+              photoUrl: captainPhotoUrl,
               phone: driver.user.phone,
               isActive: driver.isActive,
             }
           : null,
         captainName: driver?.user.fullName ?? null,
-        captainPhotoUrl: driver?.user.avatarUrl ?? null,
+        captainPhotoUrl,
+        vehiclePhotoUrl,
         captainRatingAverage:
           ratingCount > 0 && driver ? money(driver.ratingAverage) : null,
         captainRatingCount: ratingCount,

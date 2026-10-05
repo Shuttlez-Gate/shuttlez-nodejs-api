@@ -258,6 +258,7 @@ model Trip {
   @@index([driverId], map: "IX_TripsSet_DriverId")
   @@index([routeId], map: "IX_TripsSet_RouteId")
   @@index([parentTripId], map: "IX_TripsSet_ParentTripId")
+  @@index([status, scheduledAt], map: "IX_TripsSet_Status_ScheduledAt")
   @@map("TripsSet")
 }
 
@@ -289,6 +290,7 @@ model Booking {
 
   @@index([tripId], map: "IX_BookingsSet_TripId")
   @@index([userId], map: "IX_BookingsSet_UserId")
+  @@index([userId, createdAt], map: "IX_BookingsSet_UserId_CreatedAt")
   @@index([originStopId], map: "IX_BookingsSet_OriginStopId")
   @@index([destinationStopId], map: "IX_BookingsSet_DestinationStopId")
   @@map("BookingsSet")
@@ -690,7 +692,9 @@ model RideRequest {
   @@index([driverId], map: "IX_RideRequestsSet_DriverId")
   @@index([rideFareRuleId], map: "IX_RideRequestsSet_RideFareRuleId")
   @@index([riderUserId], map: "IX_RideRequestsSet_RiderUserId")
+  @@index([riderUserId, createdAt], map: "IX_RideRequestsSet_RiderUserId_CreatedAt")
   @@index([status], map: "IX_RideRequestsSet_Status")
+  @@index([status, createdAt], map: "IX_RideRequestsSet_Status_CreatedAt")
   @@map("RideRequestsSet")
 }
 
@@ -740,6 +744,7 @@ model GroupRequest {
   @@index([groupFareRuleId], map: "IX_GroupRequestsSet_GroupFareRuleId")
   @@index([organizerUserId], map: "IX_GroupRequestsSet_OrganizerUserId")
   @@index([status], map: "IX_GroupRequestsSet_Status")
+  @@index([status, createdAt], map: "IX_GroupRequestsSet_Status_CreatedAt")
   @@map("GroupRequestsSet")
 }
 

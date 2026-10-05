@@ -67,6 +67,11 @@ export class DriversController {
     return ApiResponse.ok(await this.drivers.ratings());
   }
 
+  @Get(':id/profile')
+  async profile(@Param('id') id: string) {
+    return ApiResponse.ok(await this.drivers.publicProfile(id));
+  }
+
   @Get('me/rides')
   async rides() {
     return ApiResponse.ok(await this.drivers.myRides());

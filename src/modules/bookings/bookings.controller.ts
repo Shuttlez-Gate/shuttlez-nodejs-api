@@ -34,6 +34,8 @@ import {
   remainingForRange,
   segmentPrice,
 } from '../marketplace/segment-occupancy';
+import { closeElapsedHistory } from './close-elapsed-history';
+import { loadRiderHistoryPage } from './rider-history-page';
 import { riderHistoryBucket } from './rider-history-bucket';
 
 @ApiTags('bookings')
@@ -501,17 +503,46 @@ export class TripsController {
     private readonly segments: SegmentInventoryService,
   ) {}
 
+  @Get('history')
+  async history(
+    @Query('bucket') bucket?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+    @Query('date') date?: string,
+  ) {
+    const userId = this.currentUser.requireUserId();
+    const selected = bucket === 'past' ? 'past' : 'upcoming';
+    return ApiResponse.ok(
+      await loadRiderHistoryPage(this.prisma, userId, {
+        bucket: selected,
+        page: Number(page),
+        pageSize: Number(pageSize),
+        date,
+      }),
+    );
+  }
+
   @Get('me')
   async me() {
     const userId = this.currentUser.requireUserId();
+    await closeElapsedHistory(this.prisma);
     const bookings = await this.prisma.booking.findMany({
       where: { userId, isDeleted: false },
       include: {
         originStop: true,
         destinationStop: true,
-        trip: { include: { route: true, driver: true } },
+        trip: {
+          include: {
+            route: true,
+            driver: {
+              include: {
+                user: { select: { fullName: true, avatarUrl: true } },
+              },
+            },
+          },
+        },
       },
-      orderBy: { trip: { scheduledAt: 'desc' } },
+      orderBy: [{ trip: { scheduledAt: 'desc' } }, { createdAt: 'desc' }],
     });
     const now = new Date();
     // JSON-safe DTOs (Prisma Decimal / null trip must not break history).
@@ -558,6 +589,7 @@ export class TripsController {
                 description: b.trip.route.description,
                 capacity: b.trip.route.capacity,
                 vehicleKind: b.trip.route.vehicleKind,
+                ownerType: b.trip.route.ownerType,
                 startLatitude: b.trip.route.startLatitude,
                 startLongitude: b.trip.route.startLongitude,
                 endLatitude: b.trip.route.endLatitude,
@@ -570,6 +602,8 @@ export class TripsController {
                 id: b.trip.driver.id,
                 vehicleKind: b.trip.driver.vehicleKind,
                 seats: b.trip.driver.seats,
+                name: b.trip.driver.user?.fullName ?? null,
+                photoUrl: b.trip.driver.user?.avatarUrl ?? null,
               }
             : null,
         },

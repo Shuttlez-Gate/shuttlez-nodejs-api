@@ -9,6 +9,7 @@ import { ErrorCodes } from '../../common/error-codes';
 import {
   BookingStatus,
   DriverDocumentType,
+  DriverVerificationStatus,
   GroupRequestStatus,
   RideRequestStatus,
   TripStatus,
@@ -168,6 +169,80 @@ export class DriversService {
 
   async completeTrip(tripId: string) {
     return this.transitionTrip(tripId, false);
+  }
+
+  async publicProfile(driverId: string) {
+    this.currentUser.requireUserId();
+    const driver = await this.prisma.driver.findFirst({
+      where: { id: driverId, isDeleted: false },
+      select: {
+        id: true,
+        createdAt: true,
+        ratingAverage: true,
+        ratingCount: true,
+        verificationStatus: true,
+        vehicleKind: true,
+        vehicleModelName: true,
+        vehicleColor: true,
+        plateNumber: true,
+        user: { select: { fullName: true, avatarUrl: true } },
+        vehicle: { select: { model: true, plateNumber: true, type: true } },
+      },
+    });
+    if (!driver) {
+      throw new NotFoundException('الكابتن غير موجود');
+    }
+    const [completedTrips, completedRides, completedGroups, reviews] =
+      await Promise.all([
+        this.prisma.trip.count({
+          where: {
+            driverId: driver.id,
+            isDeleted: false,
+            status: TripStatus.Completed,
+          },
+        }),
+        this.prisma.rideRequest.count({
+          where: {
+            driverId: driver.id,
+            isDeleted: false,
+            status: RideRequestStatus.Completed,
+          },
+        }),
+        this.prisma.groupRequest.count({
+          where: {
+            driverId: driver.id,
+            isDeleted: false,
+            status: GroupRequestStatus.Completed,
+          },
+        }),
+        this.prisma.review.findMany({
+          where: { driverId: driver.id, isDeleted: false },
+          orderBy: { createdAt: 'desc' },
+          take: 40,
+          select: { id: true, stars: true, comment: true, createdAt: true },
+        }),
+      ]);
+    const ratingCount = driver.ratingCount ?? 0;
+    return {
+      id: driver.id,
+      fullName: driver.user.fullName?.trim() || '',
+      avatarUrl: driver.user.avatarUrl,
+      verified: driver.verificationStatus === DriverVerificationStatus.Approved,
+      ratingAverage: ratingCount > 0 ? money(driver.ratingAverage) : null,
+      ratingCount,
+      yearsOfService: fullYearsSince(driver.createdAt),
+      completedTrips: completedTrips + completedRides + completedGroups,
+      vehicleKind: driver.vehicleKind,
+      vehicleModel: driver.vehicleModelName ?? driver.vehicle?.model ?? null,
+      vehicleColor: driver.vehicleColor,
+      plateNumber: driver.plateNumber ?? driver.vehicle?.plateNumber ?? null,
+      reviews: reviews.map((review) => ({
+        id: review.id,
+        stars: review.stars,
+        comment: review.comment?.trim() || null,
+        createdAt: review.createdAt,
+      })),
+    };
   }
 
   async ratings() {
@@ -455,6 +530,15 @@ export class DriversService {
     }
     return driver;
   }
+}
+
+function fullYearsSince(from: Date, now = new Date()): number {
+  let years = now.getUTCFullYear() - from.getUTCFullYear();
+  const month = now.getUTCMonth() - from.getUTCMonth();
+  if (month < 0 || (month === 0 && now.getUTCDate() < from.getUTCDate())) {
+    years -= 1;
+  }
+  return Math.max(0, years);
 }
 
 function resolveUiStatus(status: number, scheduledAt: Date, now: Date): string {
