@@ -314,6 +314,9 @@ export class RiderHistoryGateway implements OnModuleInit, OnModuleDestroy {
   cors: { origin: true, credentials: true },
 })
 export class DriverGateway {
+  @WebSocketServer()
+  server!: Server;
+
   @SubscribeMessage('JoinDriverRoom')
   async join(@ConnectedSocket() client: Socket) {
     const userId =
@@ -322,5 +325,16 @@ export class DriverGateway {
     if (userId) {
       await client.join(`driver-${userId}`);
     }
+    await client.join('drivers-online');
+  }
+
+  broadcastNewRide(ride: any) {
+    if (!this.server) return;
+    this.server.to('drivers-online').emit('NewRideRequest', ride);
+  }
+
+  notifyClaimed(rideId: string) {
+    if (!this.server) return;
+    this.server.to('drivers-online').emit('RideRequestClaimed', { rideId });
   }
 }

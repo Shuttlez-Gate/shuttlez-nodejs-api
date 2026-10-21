@@ -32,6 +32,8 @@ import {
   verificationLabel,
 } from '../../common/utils/enums-map';
 import { RidesService } from '../rides/rides.service';
+import { FareService } from '../pricing/fare.service';
+import { DriverGateway } from '../realtime/realtime.gateway';
 import { GroupsService } from '../groups/groups.service';
 import {
   publishRiderHistoryChange,
@@ -45,6 +47,8 @@ export class DriversService {
     private readonly currentUser: CurrentUserService,
     private readonly rides: RidesService,
     private readonly groups: GroupsService,
+    private readonly fare?: FareService,
+    private readonly driverGateway?: DriverGateway,
   ) {}
 
   async me() {
@@ -341,6 +345,111 @@ export class DriversService {
       orderBy: { createdAt: 'desc' },
     });
     return items.map((r) => this.rides.mapRide(r));
+  }
+
+  async pendingNearbyRides(latitude?: number, longitude?: number, radiusKm: number = 25) {
+    const driver = await this.requireDriver();
+    const cutoff = new Date(Date.now() - 15 * 60 * 1000);
+    const items = await this.prisma.rideRequest.findMany({
+      where: {
+        status: RideRequestStatus.Requested,
+        driverId: null,
+        isDeleted: false,
+        createdAt: { gte: cutoff },
+      },
+      include: {
+        rider: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+    });
+
+    const results = [];
+    for (const item of items) {
+      let distanceToPickupKm = 2.0;
+      if (latitude != null && longitude != null && item.pickupLatitude != null && item.pickupLongitude != null && this.fare) {
+        const d = this.fare.distanceKm(latitude, longitude, item.pickupLatitude, item.pickupLongitude);
+        if (d != null) {
+          distanceToPickupKm = d;
+          if (radiusKm > 0 && distanceToPickupKm > radiusKm) {
+            continue;
+          }
+        }
+      }
+      const tripDist = item.distanceKm ? Number(item.distanceKm) : 3.0;
+      results.push({
+        id: item.id,
+        vehicleKind: 'car',
+        passengerName: item.rider?.fullName || 'راكب شاتلز',
+        passengerPhone: item.rider?.phone || null,
+        passengerRating: 4.9,
+        pickupAddress: item.pickupAddress || 'نقطة الانطلاق',
+        dropoffAddress: item.destinationAddress || 'الوجهة المحددة',
+        pickupLatitude: item.pickupLatitude,
+        pickupLongitude: item.pickupLongitude,
+        destinationLatitude: item.destinationLatitude,
+        destinationLongitude: item.destinationLongitude,
+        fare: money(item.fareAmount),
+        distanceKm: money(distanceToPickupKm),
+        tripDistanceKm: money(tripDist),
+        etaMinutes: Math.max(3, Math.round(distanceToPickupKm * 2.5)),
+        paymentMethod: item.paymentMethod || 'cash',
+        timeoutSeconds: 30,
+        createdAt: item.createdAt,
+      });
+    }
+    return results;
+  }
+
+  async acceptRide(rideId: string) {
+    const driver = await this.requireDriver();
+    const ride = await this.prisma.rideRequest.findFirst({
+      where: { id: rideId, isDeleted: false },
+    });
+    if (!ride) {
+      throw new NotFoundException('المشوار غير موجود', ErrorCodes.RideNotFound);
+    }
+    if (ride.driverId != null && ride.driverId !== driver.id) {
+      throw new AppException('تم قبول هذا المشوار من قبل كابتن آخر', 400, ErrorCodes.RideNotAssignable);
+    }
+    if (ride.status === RideRequestStatus.Cancelled) {
+      throw new AppException('تم إلغاء هذا المشوار من قبل الراكب', 400, ErrorCodes.RideNotAssignable);
+    }
+    const updated = await this.prisma.rideRequest.update({
+      where: { id: ride.id },
+      data: {
+        driverId: driver.id,
+        status: RideRequestStatus.Assigned,
+        assignedAt: utcNow(),
+        updatedAt: utcNow(),
+      },
+      include: {
+        driver: { include: { user: true, vehicle: true } },
+      },
+    });
+    this.driverGateway?.notifyClaimed(updated.id);
+    publishRiderHistoryChange({
+      userId: updated.riderUserId,
+      product: 'ride',
+      id: updated.id,
+    });
+    return {
+      rideId: updated.id,
+      driverId: driver.id,
+      status: rideStatusLabel(updated.status),
+      assignedAt: updated.assignedAt,
+      message: 'تم قبول المشوار بنجاح',
+      ride: this.rides.mapRide(updated),
+    };
+  }
+
+  async rejectRide(rideId: string) {
+    await this.requireDriver();
+    return {
+      rideId,
+      rejected: true,
+      message: 'تم تخطي المشوار',
+    };
   }
 
   async startRide(rideId: string) {

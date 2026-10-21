@@ -15,6 +15,6 @@ import {
     GroupGateway,
     RiderHistoryGateway,
   ],
-  exports: [SupportChatGateway, GroupGateway, RiderHistoryGateway],
+  exports: [SupportChatGateway, GroupGateway, RiderHistoryGateway, DriverGateway],
 })
 export class RealtimeModule {}

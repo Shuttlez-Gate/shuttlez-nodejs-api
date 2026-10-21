@@ -14,6 +14,7 @@ import { money, refCode, requireCash, splitEarnings } from '../../common/utils/m
 import { rideStatusLabel } from '../../common/utils/enums-map';
 import { FareService } from '../pricing/fare.service';
 import { publishRiderHistoryChange } from '../realtime/rider-history-signal';
+import { DriverGateway } from '../realtime/realtime.gateway';
 
 @Injectable()
 export class RidesService {
@@ -21,6 +22,7 @@ export class RidesService {
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
     private readonly fare: FareService,
+    private readonly driverGateway?: DriverGateway,
   ) {}
 
   async quote(query: {
@@ -148,7 +150,7 @@ export class RidesService {
         ...baseFields(),
       },
     });
-    const requestedVehicleKind = trimVehicleKind(body.requestedVehicleKind);
+        const requestedVehicleKind = trimVehicleKind(body.requestedVehicleKind);
     if (requestedVehicleKind) {
       await this.prisma.$executeRaw`
         UPDATE "RideRequestsSet"
@@ -156,6 +158,32 @@ export class RidesService {
         WHERE "Id" = ${ride.id}::uuid
       `;
     }
+
+    try {
+      const rider = await this.prisma.user.findFirst({
+        where: { id: userId },
+        select: { fullName: true, phone: true },
+      });
+      this.driverGateway?.broadcastNewRide({
+        id: ride.id,
+        vehicleKind: requestedVehicleKind || 'car',
+        passengerName: rider?.fullName || 'راكب شاتلز',
+        passengerPhone: rider?.phone ?? null,
+        passengerRating: 4.9,
+        pickupAddress: ride.pickupAddress || 'نقطة الانطلاق',
+        dropoffAddress: ride.destinationAddress || 'الوجهة المحددة',
+        pickupLatitude: ride.pickupLatitude,
+        pickupLongitude: ride.pickupLongitude,
+        destinationLatitude: ride.destinationLatitude,
+        destinationLongitude: ride.destinationLongitude,
+        fare: money(ride.fareAmount),
+        distanceKm: distanceKm == null ? 2.5 : money(distanceKm),
+        etaMinutes: Math.max(3, Math.round((distanceKm ?? 2.5) * 2.5)),
+        paymentMethod: ride.paymentMethod || 'cash',
+        timeoutSeconds: 30,
+      });
+    } catch (_) {}
+
     return this.mapRide(ride, requestedVehicleKind);
   }
 

@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  Query,
   Post,
   UploadedFile,
   UseInterceptors,
@@ -86,6 +87,33 @@ export class DriversController {
   @Get('me/rides')
   async rides() {
     return ApiResponse.ok(await this.drivers.myRides());
+  }
+
+    @Get('me/pending-rides')
+  async pendingRides(
+    @Query('latitude') latitude?: string,
+    @Query('longitude') longitude?: string,
+    @Query('radiusKm') radiusKm?: string,
+  ) {
+    return ApiResponse.ok(
+      await this.drivers.pendingNearbyRides(
+        latitude ? Number(latitude) : undefined,
+        longitude ? Number(longitude) : undefined,
+        radiusKm ? Number(radiusKm) : undefined,
+      ),
+    );
+  }
+
+  @Post('me/rides/:rideId/accept')
+  async acceptRide(@Param('rideId') rideId: string) {
+    const result = await this.drivers.acceptRide(rideId);
+    return ApiResponse.ok(result, result.message);
+  }
+
+  @Post('me/rides/:rideId/reject')
+  async rejectRide(@Param('rideId') rideId: string) {
+    const result = await this.drivers.rejectRide(rideId);
+    return ApiResponse.ok(result, result.message);
   }
 
   @Post('me/rides/:rideId/start')
