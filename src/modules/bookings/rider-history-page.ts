@@ -3,7 +3,6 @@ import { PrismaService } from '../../database/prisma/prisma.service';
 import { groupStatusLabel, rideStatusLabel } from '../../common/utils/enums-map';
 import { money } from '../../common/utils/money';
 import { pageRequestFrom } from '../../common/paged-result';
-import { closeElapsedHistory } from './close-elapsed-history';
 
 const HISTORY_MAX_PAGE_SIZE = 50;
 
@@ -14,11 +13,8 @@ export type HistoryPageQuery = {
   page?: number;
   pageSize?: number;
   date?: string;
-};
-
-type HistoryKey = {
-  product: string;
-  id: string;
+  from?: string;
+  to?: string;
 };
 
 type HistoryEntry =
@@ -35,6 +31,8 @@ export type RiderHistoryPage = {
   hasAny: boolean;
 };
 
+type BucketName = HistoryBucket | 'current';
+
 export async function loadRiderHistoryPage(
   prisma: PrismaService,
   userId: string,
@@ -44,46 +42,280 @@ export async function loadRiderHistoryPage(
   const pageSize = Math.min(paging.pageSize, HISTORY_MAX_PAGE_SIZE);
   const page = paging.page;
   const skip = (page - 1) * pageSize;
-  if (page === 1) await closeElapsedHistory(prisma);
+  const take = pageSize + 1;
   const date = normalizeDate(query.date);
+  const range = normalizeRange(query.from, query.to);
   const bucket = query.bucket;
-
-  const window = await selectWindow(
-    prisma,
-    userId,
-    bucket,
-    date,
-    skip,
-    pageSize + 1,
-    page === 1,
-  );
-  const keys = window.keys;
-  const currentKey = page === 1 ? window.current : null;
-  const hasAny = page === 1 ? window.hasAny : true;
-  const hasNextPage = keys.length > pageSize;
-  const pageKeys = hasNextPage ? keys.slice(0, pageSize) : keys;
-  const currentIsSeparate =
-    currentKey != null &&
-    !pageKeys.some((key) => key.product === currentKey.product && key.id === currentKey.id);
-  const hydrated = await hydrate(
-    prisma,
-    userId,
-    currentIsSeparate && currentKey ? [...pageKeys, currentKey] : pageKeys,
-  );
-  const byKey = new Map(hydrated.map((entry) => [entryKey(entry), entry]));
-  const items = pageKeys
-    .map((key) => byKey.get(`${key.product}:${key.id}`))
+  const started = performance.now();
+  const [row] = await prisma.$queryRaw<
+    Array<{ items: unknown; current_item: unknown; has_any: boolean | null }>
+  >`
+    SELECT
+      COALESCE((
+        SELECT jsonb_agg(
+          jsonb_build_object(
+            'product', page_row.product,
+            'id', page_row.id,
+            'payload', page_row.payload
+          )
+          ORDER BY page_row.sort_at DESC, page_row.id DESC
+        )
+        FROM (
+          SELECT product, id, sort_at, payload
+          FROM (${historyBranches(userId, bucket, date, range.from, range.to, skip + take)}) merged
+          ORDER BY sort_at DESC, id DESC
+          OFFSET ${skip}
+          LIMIT ${take}
+        ) page_row
+      ), '[]'::jsonb) AS items,
+      ${
+        page === 1
+          ? Prisma.sql`(
+              SELECT jsonb_build_object(
+                'product', current_row.product,
+                'id', current_row.id,
+                'payload', current_row.payload
+              )
+              FROM (
+                SELECT product, id, sort_at, payload
+                FROM (${historyBranches(userId, 'current', date, range.from, range.to, 1)}) current_merged
+                ORDER BY sort_at DESC, id DESC
+                LIMIT 1
+              ) current_row
+            )`
+          : Prisma.sql`NULL::jsonb`
+      } AS current_item,
+      ${
+        page === 1
+          ? hasAnySql(userId)
+          : Prisma.sql`true`
+      } AS has_any
+  `;
+  const queryMs = Math.round(performance.now() - started);
+  const rawItems = asArray(row?.items);
+  const hasNextPage = rawItems.length > pageSize;
+  const pageItems = (hasNextPage ? rawItems.slice(0, pageSize) : rawItems)
+    .map(toEntry)
     .filter((entry): entry is HistoryEntry => entry != null);
-  const current = currentKey
-    ? byKey.get(`${currentKey.product}:${currentKey.id}`) ?? null
-    : null;
-  return { items, page, pageSize, hasNextPage, current, hasAny };
+  const current = page === 1 ? toEntry(asRecord(row?.current_item)) : null;
+  const hasAny = page === 1 ? row?.has_any === true : true;
+  const result: RiderHistoryPage = {
+    items: pageItems,
+    page,
+    pageSize,
+    hasNextPage,
+    current,
+    hasAny,
+  };
+  const bytes = Buffer.byteLength(JSON.stringify(result));
+  console.log(
+    `[history] bucket=${bucket} page=${page} items=${pageItems.length} hasNext=${hasNextPage} queryMs=${queryMs} bytes=${bytes}`,
+  );
+  return result;
 }
 
-function entryKey(entry: HistoryEntry): string {
-  if (entry.product === 'trip') return `trip:${String(entry.booking.tripId)}`;
-  if (entry.product === 'ride') return `ride:${String(entry.ride.id)}`;
-  return `group:${String(entry.group.id)}`;
+function historyBranches(
+  userId: string,
+  bucket: BucketName,
+  day: string | null,
+  fromDay: string | null,
+  toDay: string | null,
+  bound: number,
+): Prisma.Sql {
+  return Prisma.sql`
+    (
+      SELECT product, id, sort_at, payload
+      FROM (
+        SELECT DISTINCT ON (h."SourceId")
+          'trip'::text AS product,
+          h."SourceId"::text AS id,
+          h."DepartureAt" AS sort_at,
+          ${tripPayload()} AS payload
+        FROM "BookingsSet" b
+        INNER JOIN "TripHistoryReadModel" h
+          ON h."SourceType" = 'trip'
+         AND h."SourceId" = b."TripId"
+         AND h."IsDeleted" = false
+        LEFT JOIN "StopsSet" os ON os."Id" = b."OriginStopId"
+        LEFT JOIN "StopsSet" ds ON ds."Id" = b."DestinationStopId"
+        WHERE b."UserId" = CAST(${userId} AS uuid)
+          AND b."IsDeleted" = false
+          AND ${tripBucketSql(bucket)}
+          AND ${dayMatch(Prisma.raw('h."DepartureAt"'), day, fromDay, toDay)}
+        ORDER BY h."SourceId", b."CreatedAt" DESC
+      ) trip_deduped
+      ORDER BY sort_at DESC, id DESC
+      LIMIT ${bound}
+    )
+    UNION ALL
+    (
+      SELECT
+        'ride'::text AS product,
+        h."SourceId"::text AS id,
+        h."DepartureAt" AS sort_at,
+        ${ridePayload()} AS payload
+      FROM "RideRequestsSet" r
+      INNER JOIN "TripHistoryReadModel" h
+        ON h."SourceType" = 'ride'
+       AND h."SourceId" = r."Id"
+       AND h."IsDeleted" = false
+      WHERE r."RiderUserId" = CAST(${userId} AS uuid)
+        AND r."IsDeleted" = false
+        AND ${rideBucketSql(bucket)}
+        AND ${dayMatch(Prisma.raw('h."DepartureAt"'), day, fromDay, toDay)}
+      ORDER BY h."DepartureAt" DESC, h."SourceId" DESC
+      LIMIT ${bound}
+    )
+    UNION ALL
+    (
+      SELECT
+        'group'::text AS product,
+        h."SourceId"::text AS id,
+        h."DepartureAt" AS sort_at,
+        ${groupPayload()} AS payload
+      FROM "GroupMembersSet" m
+      INNER JOIN "TripHistoryReadModel" h
+        ON h."SourceType" = 'group'
+       AND h."SourceId" = m."GroupRequestId"
+       AND h."IsDeleted" = false
+      WHERE m."UserId" = CAST(${userId} AS uuid)
+        AND m."IsDeleted" = false
+        AND ${groupBucketSql(bucket)}
+        AND ${dayMatch(Prisma.raw('h."DepartureAt"'), day, fromDay, toDay)}
+      ORDER BY h."DepartureAt" DESC, h."SourceId" DESC
+      LIMIT ${bound}
+    )
+  `;
+}
+
+function hasAnySql(userId: string): Prisma.Sql {
+  return Prisma.sql`(
+    SELECT CASE
+      WHEN EXISTS (
+        SELECT 1
+        FROM "BookingsSet" b
+        INNER JOIN "TripHistoryReadModel" h
+          ON h."SourceType" = 'trip' AND h."SourceId" = b."TripId" AND h."IsDeleted" = false
+        WHERE b."UserId" = CAST(${userId} AS uuid) AND b."IsDeleted" = false
+      ) OR EXISTS (
+        SELECT 1
+        FROM "RideRequestsSet" r
+        INNER JOIN "TripHistoryReadModel" h
+          ON h."SourceType" = 'ride' AND h."SourceId" = r."Id" AND h."IsDeleted" = false
+        WHERE r."RiderUserId" = CAST(${userId} AS uuid) AND r."IsDeleted" = false
+      ) OR EXISTS (
+        SELECT 1
+        FROM "GroupMembersSet" m
+        INNER JOIN "TripHistoryReadModel" h
+          ON h."SourceType" = 'group' AND h."SourceId" = m."GroupRequestId" AND h."IsDeleted" = false
+        WHERE m."UserId" = CAST(${userId} AS uuid) AND m."IsDeleted" = false
+      )
+      THEN true ELSE false
+    END
+  )`;
+}
+
+function tripPayload(): Prisma.Sql {
+  return Prisma.sql`jsonb_build_object(
+    'tripId', h."SourceId",
+    'id', b."Id",
+    'status', b."Status",
+    'seatCount', b."SeatCount",
+    'referenceCode', b."ReferenceCode",
+    'vehicleKind', b."VehicleKind",
+    'totalAmount', b."TotalAmount",
+    'paymentMethod', b."PaymentMethod",
+    'createdAt', b."CreatedAt",
+    'originStop', CASE WHEN os."Id" IS NULL THEN NULL ELSE jsonb_build_object(
+      'id', os."Id", 'name', os."Name", 'latitude', os."Latitude",
+      'longitude', os."Longitude", 'order', os."Order"
+    ) END,
+    'destinationStop', CASE WHEN ds."Id" IS NULL THEN NULL ELSE jsonb_build_object(
+      'id', ds."Id", 'name', ds."Name", 'latitude', ds."Latitude",
+      'longitude', ds."Longitude", 'order', ds."Order"
+    ) END,
+    'trip', jsonb_build_object(
+      'id', h."SourceId",
+      'status', h."Status",
+      'scheduledAt', h."DepartureAt",
+      'referenceCode', h."ReferenceCode",
+      'route', jsonb_build_object(
+        'name', h."RouteName",
+        'ownerType', h."OwnerType",
+        'vehicleKind', h."RouteVehicleKind",
+        'startLatitude', h."RouteStartLatitude",
+        'startLongitude', h."RouteStartLongitude",
+        'endLatitude', h."RouteEndLatitude",
+        'endLongitude', h."RouteEndLongitude"
+      ),
+      'driver', CASE WHEN h."DriverId" IS NULL THEN NULL ELSE jsonb_build_object(
+        'id', h."DriverId",
+        'vehicleKind', h."VehicleKind",
+        'name', h."DriverName",
+        'photoUrl', h."DriverPhotoUrl",
+        'user', jsonb_build_object(
+          'fullName', h."DriverName",
+          'avatarUrl', h."DriverPhotoUrl"
+        )
+      ) END
+    )
+  )`;
+}
+
+function ridePayload(): Prisma.Sql {
+  return Prisma.sql`jsonb_build_object(
+    'id', h."SourceId",
+    'status', h."Status",
+    'pickupLatitude', h."OriginLatitude",
+    'pickupLongitude', h."OriginLongitude",
+    'pickupAddress', h."OriginName",
+    'destinationLatitude', h."DestinationLatitude",
+    'destinationLongitude', h."DestinationLongitude",
+    'destinationAddress', h."DestinationName",
+    'totalAmount', h."TotalAmount",
+    'fareAmount', h."FareAmount",
+    'paymentMethod', h."PaymentMethod",
+    'scheduledFor', h."ScheduledFor",
+    'startedAt', h."StartedAt",
+    'createdAt', h."SourceCreatedAt",
+    'referenceCode', h."ReferenceCode",
+    'requestedVehicleKind', h."RequestedVehicleKind",
+    'driverId', h."DriverId",
+    'driverName', h."DriverName",
+    'driverPhotoUrl', h."DriverPhotoUrl",
+    'driverRatingAverage', h."DriverRatingAverage",
+    'driverRatingCount', h."DriverRatingCount",
+    'vehicleKind', h."VehicleKind",
+    'vehicleModel', h."VehicleModel",
+    'vehicleColor', h."VehicleColor",
+    'plateNumber', h."PlateNumber"
+  )`;
+}
+
+function groupPayload(): Prisma.Sql {
+  return Prisma.sql`jsonb_build_object(
+    'id', h."SourceId",
+    'status', h."Status",
+    'pickupLatitude', h."OriginLatitude",
+    'pickupLongitude', h."OriginLongitude",
+    'pickupAddress', h."OriginName",
+    'destinationLatitude', h."DestinationLatitude",
+    'destinationLongitude', h."DestinationLongitude",
+    'destinationAddress', h."DestinationName",
+    'capacity', h."Capacity",
+    'totalAmount', h."TotalAmount",
+    'fareAmount', h."FareAmount",
+    'paymentMethod', h."PaymentMethod",
+    'startedAt', h."StartedAt",
+    'createdAt', h."SourceCreatedAt",
+    'referenceCode', h."ReferenceCode",
+    'driverId', h."DriverId",
+    'driverName', h."DriverName",
+    'driverPhotoUrl', h."DriverPhotoUrl",
+    'driverRatingAverage', h."DriverRatingAverage",
+    'driverRatingCount', h."DriverRatingCount",
+    'vehicleKind', h."VehicleKind"
+  )`;
 }
 
 function normalizeDate(value?: string): string | null {
@@ -92,313 +324,184 @@ function normalizeDate(value?: string): string | null {
   return raw;
 }
 
-async function selectWindow(
-  prisma: PrismaService,
-  userId: string,
-  bucket: HistoryBucket,
-  date: string | null,
-  skip: number,
-  take: number,
-  includeCurrent: boolean,
-): Promise<{ keys: HistoryKey[]; current: HistoryKey | null; hasAny: boolean }> {
-  const day = date;
-  const rows = await prisma.$queryRaw<Array<HistoryKey & { slot: string; pos: number }>>`
-    WITH rows AS (
-      (
-      SELECT DISTINCT ON (t."Id")
-        'trip'::text AS product,
-        t."Id"::text AS id,
-        t."ScheduledAt" AS sort_at,
-        CASE
-          WHEN b."Status" IN (3, 4) OR t."Status" IN (4, 5) THEN 'past'
-          WHEN t."Status" = 3
-            AND (t."ScheduledAt" AT TIME ZONE 'Africa/Cairo')::date
-              = (now() AT TIME ZONE 'Africa/Cairo')::date
-            THEN 'current'
-          WHEN t."ScheduledAt" > now() THEN 'upcoming'
-          ELSE 'past'
-        END AS bucket
-      FROM "BookingsSet" b
-      INNER JOIN "TripsSet" t ON t."Id" = b."TripId" AND t."IsDeleted" = false
-      WHERE b."UserId" = CAST(${userId} AS uuid)
-        AND b."IsDeleted" = false
-      ORDER BY t."Id", b."CreatedAt" DESC
-      )
-      UNION ALL
-      SELECT
-        'ride'::text,
-        r."Id"::text,
-        COALESCE(r."ScheduledFor", r."StartedAt", r."CreatedAt"),
-        CASE
-          WHEN r."Status" IN (4, 5) THEN 'past'
-          WHEN r."ScheduledFor" IS NOT NULL OR (r."Status" = 3 AND r."StartedAt" IS NOT NULL) THEN
-            CASE
-              WHEN r."Status" = 3
-                AND (COALESCE(r."ScheduledFor", r."StartedAt") AT TIME ZONE 'Africa/Cairo')::date
-                  = (now() AT TIME ZONE 'Africa/Cairo')::date
-                THEN 'current'
-              WHEN COALESCE(r."ScheduledFor", r."StartedAt") > now() THEN 'upcoming'
-              ELSE 'past'
-            END
-          WHEN (r."CreatedAt" AT TIME ZONE 'Africa/Cairo')::date
-            >= (now() AT TIME ZONE 'Africa/Cairo')::date
-            THEN CASE WHEN r."Status" = 3 THEN 'current' ELSE 'upcoming' END
-          ELSE 'past'
-        END
-      FROM "RideRequestsSet" r
-      WHERE r."RiderUserId" = CAST(${userId} AS uuid)
-        AND r."IsDeleted" = false
-      UNION ALL
-      SELECT
-        'group'::text,
-        g."Id"::text,
-        COALESCE(g."StartedAt", g."CreatedAt"),
-        CASE
-          WHEN g."Status" IN (5, 6) THEN 'past'
-          WHEN g."Status" = 4 AND g."StartedAt" IS NOT NULL THEN
-            CASE
-              WHEN (g."StartedAt" AT TIME ZONE 'Africa/Cairo')::date
-                = (now() AT TIME ZONE 'Africa/Cairo')::date THEN 'current'
-              WHEN g."StartedAt" > now() THEN 'upcoming'
-              ELSE 'past'
-            END
-          WHEN (g."CreatedAt" AT TIME ZONE 'Africa/Cairo')::date
-            >= (now() AT TIME ZONE 'Africa/Cairo')::date
-            THEN CASE WHEN g."Status" = 4 THEN 'current' ELSE 'upcoming' END
-          ELSE 'past'
-        END
-      FROM "GroupMembersSet" m
-      INNER JOIN "GroupRequestsSet" g
-        ON g."Id" = m."GroupRequestId" AND g."IsDeleted" = false
-      WHERE m."UserId" = CAST(${userId} AS uuid)
-        AND m."IsDeleted" = false
-    )
-    SELECT product, id, slot, pos
-    FROM (
-      SELECT product, id, 'page'::text AS slot, pos
-      FROM (
-        SELECT
-          product,
-          id,
-          ROW_NUMBER() OVER (ORDER BY sort_at DESC, id DESC) AS pos
-        FROM rows
-        WHERE bucket = ${bucket}
-          AND (
-            CAST(${day} AS date) IS NULL
-            OR (sort_at AT TIME ZONE 'Africa/Cairo')::date = CAST(${day} AS date)
-          )
-        ORDER BY sort_at DESC, id DESC
-        OFFSET ${skip}
-        LIMIT ${take}
-      ) page_src
-      UNION ALL
-      SELECT product, id, 'current'::text, 0
-      FROM (
-        SELECT product, id
-        FROM rows
-        WHERE CAST(${includeCurrent} AS boolean)
-          AND bucket = 'current'
-          AND (
-            CAST(${day} AS date) IS NULL
-            OR (sort_at AT TIME ZONE 'Africa/Cairo')::date = CAST(${day} AS date)
-          )
-        ORDER BY sort_at DESC, id DESC
-        LIMIT 1
-      ) current_src
-      UNION ALL
-      SELECT
-        'meta',
-        CASE WHEN EXISTS (SELECT 1 FROM rows) THEN '1' ELSE '0' END,
-        'has',
-        0
-    ) picked
-  `;
-  const keys = rows
-    .filter((row) => row.slot === 'page')
-    .sort((left, right) => Number(left.pos) - Number(right.pos))
-    .map((row) => ({ product: row.product, id: row.id }));
-  const currentRow = rows.find((row) => row.slot === 'current');
-  const hasRow = rows.find((row) => row.slot === 'has');
-  return {
-    keys,
-    current: currentRow ? { product: currentRow.product, id: currentRow.id } : null,
-    hasAny: hasRow?.id === '1',
-  };
+function normalizeRange(from?: string, to?: string): { from: string | null; to: string | null } {
+  let start = normalizeDate(from);
+  let end = normalizeDate(to);
+  if (start && end && start > end) {
+    const swap = start;
+    start = end;
+    end = swap;
+  }
+  if (start && !end) end = start;
+  return { from: start, to: end };
 }
 
-async function hydrate(
-  prisma: PrismaService,
-  userId: string,
-  keys: HistoryKey[],
-): Promise<HistoryEntry[]> {
-  if (keys.length === 0) return [];
-  const tripIds = keys.filter((key) => key.product === 'trip').map((key) => key.id);
-  const rideIds = keys.filter((key) => key.product === 'ride').map((key) => key.id);
-  const groupIds = keys.filter((key) => key.product === 'group').map((key) => key.id);
-  const rows = await loadCards(prisma, userId, tripIds, rideIds, groupIds);
-  const bookings = rows.filter((row) => row.product === 'trip').map((row) => mapBooking(row.payload));
-  const rides = rows.filter((row) => row.product === 'ride').map((row) => mapRide(row.payload));
-  const groups = rows.filter((row) => row.product === 'group').map((row) => mapGroup(row.payload));
-  const byKey = new Map<string, HistoryEntry>();
-  for (const booking of bookings) byKey.set(`trip:${booking.tripId}`, { product: 'trip', booking });
-  for (const ride of rides) byKey.set(`ride:${ride.id}`, { product: 'ride', ride });
-  for (const group of groups) byKey.set(`group:${group.id}`, { product: 'group', group });
-  return keys
-    .map((key) => byKey.get(`${key.product}:${key.id}`))
-    .filter((entry): entry is HistoryEntry => entry != null);
-}
-
-type CardRow = { product: string; id: string; payload: Record<string, unknown> };
-
-function uuidIn(columnSql: string, ids: string[]): Prisma.Sql {
-  if (ids.length === 0) return Prisma.sql`FALSE`;
-  return Prisma.sql`${Prisma.raw(columnSql)}::text IN (${Prisma.join(ids)})`;
-}
-
-async function loadCards(
-  prisma: PrismaService,
-  userId: string,
-  tripIds: string[],
-  rideIds: string[],
-  groupIds: string[],
-): Promise<CardRow[]> {
-  return prisma.$queryRaw<CardRow[]>`
+function dayMatch(
+  sortSql: Prisma.Sql,
+  day: string | null,
+  fromDay: string | null,
+  toDay: string | null,
+): Prisma.Sql {
+  return Prisma.sql`(
     (
-      SELECT DISTINCT ON (t."Id")
-        'trip'::text AS product,
-        t."Id"::text AS id,
-        jsonb_build_object(
-          'tripId', t."Id",
-          'id', b."Id",
-          'status', b."Status",
-          'seatCount', b."SeatCount",
-          'referenceCode', b."ReferenceCode",
-          'vehicleKind', b."VehicleKind",
-          'totalAmount', b."TotalAmount",
-          'paymentMethod', b."PaymentMethod",
-          'createdAt', b."CreatedAt",
-          'originStop', CASE WHEN os."Id" IS NULL THEN NULL ELSE jsonb_build_object(
-            'id', os."Id",
-            'name', os."Name",
-            'latitude', os."Latitude",
-            'longitude', os."Longitude",
-            'order', os."Order"
-          ) END,
-          'destinationStop', CASE WHEN ds."Id" IS NULL THEN NULL ELSE jsonb_build_object(
-            'id', ds."Id",
-            'name', ds."Name",
-            'latitude', ds."Latitude",
-            'longitude', ds."Longitude",
-            'order', ds."Order"
-          ) END,
-          'trip', jsonb_build_object(
-            'id', t."Id",
-            'status', t."Status",
-            'scheduledAt', t."ScheduledAt",
-            'referenceCode', t."ReferenceCode",
-            'route', jsonb_build_object(
-              'name', rt."Name",
-              'ownerType', rt."OwnerType",
-              'vehicleKind', rt."VehicleKind",
-              'startLatitude', rt."StartLatitude",
-              'startLongitude', rt."StartLongitude",
-              'endLatitude', rt."EndLatitude",
-              'endLongitude', rt."EndLongitude"
-            ),
-            'driver', CASE WHEN d."Id" IS NULL THEN NULL ELSE jsonb_build_object(
-              'id', d."Id",
-              'vehicleKind', d."VehicleKind",
-              'name', u."FullName",
-              'photoUrl', u."AvatarUrl",
-              'user', jsonb_build_object(
-                'fullName', u."FullName",
-                'avatarUrl', u."AvatarUrl"
-              )
-            ) END
-          )
-        ) AS payload
-      FROM "BookingsSet" b
-      INNER JOIN "TripsSet" t ON t."Id" = b."TripId" AND t."IsDeleted" = false
-      INNER JOIN "RoutesSet" rt ON rt."Id" = t."RouteId"
-      LEFT JOIN "StopsSet" os ON os."Id" = b."OriginStopId"
-      LEFT JOIN "StopsSet" ds ON ds."Id" = b."DestinationStopId"
-      LEFT JOIN "DriversSet" d ON d."Id" = t."DriverId"
-      LEFT JOIN "UsersSet" u ON u."Id" = d."UserId"
-      WHERE b."UserId" = CAST(${userId} AS uuid)
-        AND b."IsDeleted" = false
-        AND ${uuidIn('t."Id"', tripIds)}
-      ORDER BY t."Id", b."CreatedAt" DESC
+      CAST(${fromDay} AS date) IS NULL
+      AND (
+        CAST(${day} AS date) IS NULL
+        OR (${sortSql} AT TIME ZONE 'Africa/Cairo')::date = CAST(${day} AS date)
+      )
     )
-    UNION ALL
-    SELECT
-      'ride'::text,
-      r."Id"::text,
-      jsonb_build_object(
-        'id', r."Id",
-        'status', r."Status",
-        'pickupLatitude', r."PickupLatitude",
-        'pickupLongitude', r."PickupLongitude",
-        'pickupAddress', r."PickupAddress",
-        'destinationLatitude', r."DestinationLatitude",
-        'destinationLongitude', r."DestinationLongitude",
-        'destinationAddress', r."DestinationAddress",
-        'totalAmount', r."TotalAmount",
-        'fareAmount', r."FareAmount",
-        'paymentMethod', r."PaymentMethod",
-        'scheduledFor', r."ScheduledFor",
-        'startedAt', r."StartedAt",
-        'createdAt', r."CreatedAt",
-        'referenceCode', r."ReferenceCode",
-        'requestedVehicleKind', r."RequestedVehicleKind",
-        'driverId', d."Id",
-        'driverName', u."FullName",
-        'driverPhotoUrl', u."AvatarUrl",
-        'driverRatingAverage', CASE WHEN d."RatingCount" > 0 THEN d."RatingAverage" ELSE NULL END,
-        'driverRatingCount', CASE WHEN d."RatingCount" > 0 THEN d."RatingCount" ELSE NULL END,
-        'vehicleKind', COALESCE(d."VehicleKind", v."Type"::text),
-        'vehicleModel', COALESCE(d."VehicleModelName", v."Model"),
-        'vehicleColor', d."VehicleColor",
-        'plateNumber', COALESCE(d."PlateNumber", v."PlateNumber")
+    OR (
+      CAST(${fromDay} AS date) IS NOT NULL
+      AND (${sortSql} AT TIME ZONE 'Africa/Cairo')::date >= CAST(${fromDay} AS date)
+      AND (${sortSql} AT TIME ZONE 'Africa/Cairo')::date <= COALESCE(CAST(${toDay} AS date), CAST(${fromDay} AS date))
+    )
+  )`;
+}
+
+function tripBucketSql(bucket: BucketName): Prisma.Sql {
+  const open = Prisma.sql`b."Status" NOT IN (3, 4) AND h."Status" NOT IN (4, 5)`;
+  if (bucket === 'current') {
+    return Prisma.sql`${open}
+      AND h."Status" = 3
+      AND (h."DepartureAt" AT TIME ZONE 'Africa/Cairo')::date
+        = (now() AT TIME ZONE 'Africa/Cairo')::date`;
+  }
+  if (bucket === 'upcoming') {
+    return Prisma.sql`${open}
+      AND h."DepartureAt" > now()
+      AND NOT (
+        h."Status" = 3
+        AND (h."DepartureAt" AT TIME ZONE 'Africa/Cairo')::date
+          = (now() AT TIME ZONE 'Africa/Cairo')::date
+      )`;
+  }
+  return Prisma.sql`(
+    b."Status" IN (3, 4)
+    OR h."Status" IN (4, 5)
+    OR (
+      h."DepartureAt" <= now()
+      AND NOT (
+        h."Status" = 3
+        AND (h."DepartureAt" AT TIME ZONE 'Africa/Cairo')::date
+          = (now() AT TIME ZONE 'Africa/Cairo')::date
       )
-    FROM "RideRequestsSet" r
-    LEFT JOIN "DriversSet" d ON d."Id" = r."DriverId"
-    LEFT JOIN "UsersSet" u ON u."Id" = d."UserId"
-    LEFT JOIN "VehiclesSet" v ON v."Id" = d."VehicleId"
-    WHERE r."IsDeleted" = false
-      AND ${uuidIn('r."Id"', rideIds)}
-    UNION ALL
-    SELECT
-      'group'::text,
-      g."Id"::text,
-      jsonb_build_object(
-        'id', g."Id",
-        'status', g."Status",
-        'pickupLatitude', g."PickupLatitude",
-        'pickupLongitude', g."PickupLongitude",
-        'pickupAddress', g."PickupAddress",
-        'destinationLatitude', g."DestinationLatitude",
-        'destinationLongitude', g."DestinationLongitude",
-        'destinationAddress', g."DestinationAddress",
-        'capacity', g."Capacity",
-        'totalAmount', g."TotalAmount",
-        'fareAmount', g."FareAmount",
-        'paymentMethod', g."PaymentMethod",
-        'startedAt', g."StartedAt",
-        'createdAt', g."CreatedAt",
-        'referenceCode', g."ReferenceCode",
-        'driverId', d."Id",
-        'driverName', u."FullName",
-        'driverPhotoUrl', u."AvatarUrl",
-        'driverRatingAverage', CASE WHEN d."RatingCount" > 0 THEN d."RatingAverage" ELSE NULL END,
-        'driverRatingCount', CASE WHEN d."RatingCount" > 0 THEN d."RatingCount" ELSE NULL END,
-        'vehicleKind', d."VehicleKind"
+    )
+  )`;
+}
+
+function rideBucketSql(bucket: BucketName): Prisma.Sql {
+  const scheduled = Prisma.sql`COALESCE(h."ScheduledFor", h."StartedAt")`;
+  const onSchedule = Prisma.sql`(
+    h."ScheduledFor" IS NOT NULL
+    OR (h."Status" = 3 AND h."StartedAt" IS NOT NULL)
+  )`;
+  const sameCairoDay = Prisma.sql`(
+    h."Status" = 3
+    AND (${scheduled} AT TIME ZONE 'Africa/Cairo')::date
+      = (now() AT TIME ZONE 'Africa/Cairo')::date
+  )`;
+  const createdToday = Prisma.sql`(
+    (h."SourceCreatedAt" AT TIME ZONE 'Africa/Cairo')::date
+      >= (now() AT TIME ZONE 'Africa/Cairo')::date
+  )`;
+  if (bucket === 'current') {
+    return Prisma.sql`h."Status" NOT IN (4, 5) AND (
+      (${onSchedule} AND ${sameCairoDay})
+      OR (NOT ${onSchedule} AND ${createdToday} AND h."Status" = 3)
+    )`;
+  }
+  if (bucket === 'upcoming') {
+    return Prisma.sql`h."Status" NOT IN (4, 5) AND (
+      (
+        ${onSchedule}
+        AND NOT ${sameCairoDay}
+        AND ${scheduled} > now()
       )
-    FROM "GroupRequestsSet" g
-    LEFT JOIN "DriversSet" d ON d."Id" = g."DriverId"
-    LEFT JOIN "UsersSet" u ON u."Id" = d."UserId"
-    WHERE g."IsDeleted" = false
-      AND ${uuidIn('g."Id"', groupIds)}
-  `;
+      OR (
+        NOT ${onSchedule}
+        AND ${createdToday}
+        AND h."Status" <> 3
+      )
+    )`;
+  }
+  return Prisma.sql`(
+    h."Status" IN (4, 5)
+    OR (
+      ${onSchedule}
+      AND NOT ${sameCairoDay}
+      AND ${scheduled} <= now()
+    )
+    OR (
+      NOT ${onSchedule}
+      AND NOT ${createdToday}
+    )
+  )`;
+}
+
+function groupBucketSql(bucket: BucketName): Prisma.Sql {
+  const started = Prisma.sql`(h."Status" = 4 AND h."StartedAt" IS NOT NULL)`;
+  const startedToday = Prisma.sql`(
+    (h."StartedAt" AT TIME ZONE 'Africa/Cairo')::date
+      = (now() AT TIME ZONE 'Africa/Cairo')::date
+  )`;
+  const createdToday = Prisma.sql`(
+    (h."SourceCreatedAt" AT TIME ZONE 'Africa/Cairo')::date
+      >= (now() AT TIME ZONE 'Africa/Cairo')::date
+  )`;
+  if (bucket === 'current') {
+    return Prisma.sql`h."Status" NOT IN (5, 6) AND (
+      (${started} AND ${startedToday})
+      OR (NOT ${started} AND ${createdToday} AND h."Status" = 4)
+    )`;
+  }
+  if (bucket === 'upcoming') {
+    return Prisma.sql`h."Status" NOT IN (5, 6) AND (
+      (${started} AND NOT ${startedToday} AND h."StartedAt" > now())
+      OR (NOT ${started} AND ${createdToday} AND h."Status" <> 4)
+    )`;
+  }
+  return Prisma.sql`(
+    h."Status" IN (5, 6)
+    OR (${started} AND NOT ${startedToday} AND h."StartedAt" <= now())
+    OR (NOT ${started} AND NOT ${createdToday})
+  )`;
+}
+
+function asArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    try {
+      return asRecord(JSON.parse(value) as unknown);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value === 'object') return value as Record<string, unknown>;
+  return null;
+}
+
+function toEntry(raw: unknown): HistoryEntry | null {
+  const row = asRecord(raw);
+  if (!row) return null;
+  const payload = asRecord(row.payload);
+  if (!payload) return null;
+  if (row.product === 'trip') return { product: 'trip', booking: mapBooking(payload) };
+  if (row.product === 'ride') return { product: 'ride', ride: mapRide(payload) };
+  if (row.product === 'group') return { product: 'group', group: mapGroup(payload) };
+  return null;
 }
 
 function mapBooking(payload: Record<string, unknown>): Record<string, unknown> & { tripId: string } {

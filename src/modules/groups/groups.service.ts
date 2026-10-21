@@ -15,6 +15,7 @@ import { groupStatusLabel } from '../../common/utils/enums-map';
 import { FareService } from '../pricing/fare.service';
 import { isSelfOwnedTrip } from '../marketplace/self-booking';
 import { GroupGateway } from '../realtime/realtime.gateway';
+import { publishGroupRiders } from '../realtime/rider-history-signal';
 
 @Injectable()
 export class GroupsService {
@@ -530,6 +531,7 @@ export class GroupsService {
     const group = await this.requireGroup(groupId);
     const mapped = this.mapGroup(group);
     this.groupHub.publish(mapped);
+    await publishGroupRiders(this.prisma, group.id, group.organizerUserId);
     return mapped;
   }
 

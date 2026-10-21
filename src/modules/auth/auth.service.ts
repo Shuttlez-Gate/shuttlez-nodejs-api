@@ -557,17 +557,44 @@ export class AuthService {
     if (!isDriverClient(client)) {
       return;
     }
-    if (user.userType !== UserType.Driver || !user.isActive) {
+    if (!user.isActive) {
+      throw new AppException('تم تعطيل هذا الحساب. تواصل مع الإدارة');
+    }
+
+    let driver = await this.prisma.driver.findFirst({
+      where: { userId: user.id, isDeleted: false },
+    });
+
+    if (!driver && user.userType !== UserType.Driver) {
       throw new AppException(
         'هذا الحساب غير مصرح له بدخول تطبيق الكابتن. الدخول للكباتن المعتمدين فقط',
       );
     }
-    const hasActiveDriver = await this.prisma.driver.findFirst({
-      where: { userId: user.id, isDeleted: false, isActive: true },
-    });
-    if (!hasActiveDriver) {
+
+    // Auto-sync user.userType if driver record exists
+    if (driver && user.userType !== UserType.Driver) {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { userType: UserType.Driver, updatedAt: utcNow() },
+      });
+      user.userType = UserType.Driver;
+    }
+
+    if (!driver) {
       throw new AppException(
-        'حساب الكابتن غير مكتمل أو غير مفعّل. تواصل مع الإدارة',
+        'حساب الكابتن غير مكتمل أو غير مسجل. يرجى تسجيل حساب كابتن جديد',
+      );
+    }
+
+    if (driver.verificationStatus === DriverVerificationStatus.Rejected) {
+      throw new AppException(
+        'تم رفض طلب انضمام الكابتن. تواصل مع الإدارة لمزيد من التفاصيل',
+      );
+    }
+
+    if (driver.verificationStatus === DriverVerificationStatus.Approved && !driver.isActive) {
+      throw new AppException(
+        'حساب الكابتن معطل حالياً من قِبل الإدارة. تواصل مع الدعم الفني',
       );
     }
   }

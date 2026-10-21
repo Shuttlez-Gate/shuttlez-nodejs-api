@@ -34,8 +34,8 @@ import {
   remainingForRange,
   segmentPrice,
 } from '../marketplace/segment-occupancy';
-import { closeElapsedHistory } from './close-elapsed-history';
 import { loadRiderHistoryPage } from './rider-history-page';
+import { publishRiderHistoryChange } from '../realtime/rider-history-signal';
 import { riderHistoryBucket } from './rider-history-bucket';
 import { isSelfOwnedTrip, tripsNotOwnedByViewer } from '../marketplace/self-booking';
 
@@ -551,6 +551,8 @@ export class TripsController {
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
     @Query('date') date?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
   ) {
     const userId = this.currentUser.requireUserId();
     const selected = bucket === 'past' ? 'past' : 'upcoming';
@@ -560,6 +562,8 @@ export class TripsController {
         page: Number(page),
         pageSize: Number(pageSize),
         date,
+        from,
+        to,
       }),
     );
   }
@@ -567,7 +571,6 @@ export class TripsController {
   @Get('me')
   async me() {
     const userId = this.currentUser.requireUserId();
-    await closeElapsedHistory(this.prisma);
     const bookings = await this.prisma.booking.findMany({
       where: { userId, isDeleted: false },
       include: {
@@ -808,6 +811,11 @@ export class TripsController {
               "UpdatedAt" = NOW()
           WHERE "Id" = ${booking.tripId}::uuid AND "IsDeleted" = false`;
       }
+    });
+    publishRiderHistoryChange({
+      userId,
+      product: 'trip',
+      id: booking.tripId,
     });
     return ApiResponse.ok(true, 'تم إلغاء الرحلة بنجاح');
   }

@@ -25,6 +25,7 @@ import { GroupRequestStatus, RideRequestStatus } from '../../common/enums';
 import { RidesService } from '../rides/rides.service';
 import { GroupsService } from '../groups/groups.service';
 import { SupportChatGateway } from '../realtime/realtime.gateway';
+import { publishRiderHistoryChange } from '../realtime/rider-history-signal';
 import { AdminDashboardService } from './dashboard.service';
 import { assertCaptainEligible } from './captain-eligibility';
 import {
@@ -375,6 +376,11 @@ export class AdminRidesController {
       },
       include: { driver: { include: { user: true, vehicle: true } } },
     });
+    publishRiderHistoryChange({
+      userId: updated.riderUserId,
+      product: 'ride',
+      id: updated.id,
+    });
     return ApiResponse.ok(this.rides.mapRide(updated, requestedKind), 'تم تعيين الكابتن');
   }
 
@@ -395,6 +401,11 @@ export class AdminRidesController {
         updatedAt: utcNow(),
       },
       include: { driver: { include: { user: true, vehicle: true } } },
+    });
+    publishRiderHistoryChange({
+      userId: updated.riderUserId,
+      product: 'ride',
+      id: updated.id,
     });
     return ApiResponse.ok(this.rides.mapRide(updated), 'تم إلغاء تعيين الكابتن');
   }

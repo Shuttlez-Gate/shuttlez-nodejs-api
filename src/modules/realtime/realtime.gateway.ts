@@ -1,3 +1,4 @@
+import { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import {
   ConnectedSocket,
   MessageBody,
@@ -8,6 +9,10 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
 import { PrismaService } from '../../database/prisma/prisma.service';
+import {
+  onRiderHistoryChange,
+  RiderHistoryChange,
+} from './rider-history-signal';
 
 @WebSocketGateway({
   path: '/hubs/trip-tracking',
@@ -245,6 +250,51 @@ export class GroupGateway {
       peerUserId,
       typing,
     });
+  }
+
+  private async userId(client: Socket): Promise<string> {
+    const token = String(client.handshake.auth?.token ?? '').trim();
+    if (!token) return '';
+    try {
+      const payload = await this.jwt.verifyAsync<{ sub?: string }>(token);
+      return payload.sub ?? '';
+    } catch {
+      return '';
+    }
+  }
+}
+
+@WebSocketGateway({
+  path: '/hubs/rider',
+  cors: { origin: true, credentials: true },
+})
+export class RiderHistoryGateway implements OnModuleInit, OnModuleDestroy {
+  @WebSocketServer()
+  server!: Server;
+
+  private stopListen: (() => void) | null = null;
+
+  constructor(private readonly jwt: JwtService) {}
+
+  onModuleInit(): void {
+    this.stopListen = onRiderHistoryChange((change) => this.publish(change));
+  }
+
+  onModuleDestroy(): void {
+    this.stopListen?.();
+    this.stopListen = null;
+  }
+
+  @SubscribeMessage('JoinUser')
+  async joinUser(@ConnectedSocket() client: Socket) {
+    const userId = await this.userId(client);
+    if (!userId) return;
+    await client.join(`user-${userId}`);
+  }
+
+  publish(change: RiderHistoryChange): void {
+    if (!change.userId || !this.server) return;
+    this.server.to(`user-${change.userId}`).emit('RiderHistoryChanged', change);
   }
 
   private async userId(client: Socket): Promise<string> {

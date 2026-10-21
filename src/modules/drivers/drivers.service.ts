@@ -33,6 +33,10 @@ import {
 } from '../../common/utils/enums-map';
 import { RidesService } from '../rides/rides.service';
 import { GroupsService } from '../groups/groups.service';
+import {
+  publishRiderHistoryChange,
+  publishTripRiders,
+} from '../realtime/rider-history-signal';
 
 @Injectable()
 export class DriversService {
@@ -44,7 +48,7 @@ export class DriversService {
   ) {}
 
   async me() {
-    const driver = await this.requireDriver();
+    const driver = await this.requireDriver(false);
     return {
       id: driver.id,
       userId: driver.userId,
@@ -79,7 +83,7 @@ export class DriversService {
     documentType = 'Other',
     notes?: string,
   ) {
-    const driver = await this.requireDriver();
+    const driver = await this.requireDriver(false);
     if (!file?.buffer?.length) {
       throw new AppException('الملف مطلوب');
     }
@@ -421,6 +425,7 @@ export class DriversService {
         where: { id: trip.id },
         data: { status: TripStatus.InProgress, startedAt: utcNow(), updatedAt: utcNow() },
       });
+      await publishTripRiders(this.prisma, updated.id);
       return lifecycle('trip', updated.id, driver.id, updated.status, updated.startedAt, updated.completedAt, 'تم بدء الرحلة');
     }
     if (trip.status === TripStatus.Completed) {
@@ -433,6 +438,7 @@ export class DriversService {
       where: { id: trip.id },
       data: { status: TripStatus.Completed, completedAt: utcNow(), updatedAt: utcNow() },
     });
+    await publishTripRiders(this.prisma, updated.id);
     return lifecycle('trip', updated.id, driver.id, updated.status, updated.startedAt, updated.completedAt, 'تم إنهاء الرحلة');
   }
 
@@ -464,6 +470,11 @@ export class DriversService {
         where: { id: ride.id },
         data: { status: RideRequestStatus.InProgress, startedAt: utcNow(), updatedAt: utcNow() },
       });
+      publishRiderHistoryChange({
+        userId: updated.riderUserId,
+        product: 'ride',
+        id: updated.id,
+      });
       return {
         rideId: updated.id,
         driverId: driver.id,
@@ -493,6 +504,11 @@ export class DriversService {
     const updated = await this.prisma.rideRequest.update({
       where: { id: ride.id },
       data: { status: RideRequestStatus.Completed, completedAt: utcNow(), updatedAt: utcNow() },
+    });
+    publishRiderHistoryChange({
+      userId: updated.riderUserId,
+      product: 'ride',
+      id: updated.id,
     });
     return {
       rideId: updated.id,
@@ -581,7 +597,7 @@ export class DriversService {
     };
   }
 
-  private async requireDriver() {
+  private async requireDriver(mustBeActive = true) {
     const userId = this.currentUser.requireUserId();
     const driver = await this.prisma.driver.findFirst({
       where: { userId, isDeleted: false },
@@ -591,7 +607,10 @@ export class DriversService {
         documents: true,
       },
     });
-    if (!driver || !driver.isActive) {
+    if (!driver) {
+      throw new AppException('حساب الكابتن غير موجود', 404, ErrorCodes.DriverNotFound);
+    }
+    if (mustBeActive && !driver.isActive) {
       throw new AppException('حساب الكابتن غير موجود أو غير نشط', 403, ErrorCodes.DriverNotEligible);
     }
     return driver;

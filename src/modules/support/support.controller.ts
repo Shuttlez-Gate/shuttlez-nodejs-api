@@ -30,8 +30,28 @@ export class SupportController {
           tab === 'closed' || tab === 'completed' ? 'closed' : { not: 'closed' },
       },
       orderBy: { createdAt: 'desc' },
+      include: {
+        trip: {
+          include: {
+            route: {
+              include: {
+                stops: {
+                  where: { isDeleted: false },
+                  orderBy: { order: 'asc' },
+                },
+              },
+            },
+            bookings: {
+              where: { userId, isDeleted: false },
+              orderBy: { createdAt: 'desc' },
+              take: 1,
+              include: { originStop: true, destinationStop: true },
+            },
+          },
+        },
+      },
     });
-    return ApiResponse.ok(items);
+    return ApiResponse.ok(items.map((item) => this.toRiderTicket(item)));
   }
 
   @Post('tickets')
@@ -102,6 +122,162 @@ export class SupportController {
       createdAt: message.createdAt.toISOString(),
     });
     return ApiResponse.ok(message);
+  }
+
+  private toRiderTicket(item: {
+    id: string;
+    userId: string;
+    tripId: string | null;
+    subject: string;
+    status: string;
+    closedAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date | null;
+    isDeleted: boolean;
+    trip: {
+      id: string;
+      status: number;
+      scheduledAt: Date;
+      pricePerSeat: { toString(): string };
+      referenceCode: string | null;
+      route: {
+        name: string;
+        ownerType: number;
+        vehicleKind: string | null;
+        startLatitude: number;
+        startLongitude: number;
+        endLatitude: number;
+        endLongitude: number;
+        stops: { name: string }[];
+      };
+      bookings: {
+        seatCount: number;
+        totalAmount: { toString(): string };
+        paymentMethod: string;
+        referenceCode: string | null;
+        vehicleKind: string | null;
+        originStop: { name: string } | null;
+        destinationStop: { name: string } | null;
+      }[];
+    } | null;
+  }) {
+    const trip = item.trip;
+    const booking = trip?.bookings[0];
+    const stops = trip?.route.stops ?? [];
+    const from =
+      booking?.originStop?.name?.trim() || stops[0]?.name?.trim() || '';
+    const to =
+      booking?.destinationStop?.name?.trim() ||
+      stops[stops.length - 1]?.name?.trim() ||
+      '';
+    const vehicle = this.vehiclePresentation(
+      booking?.vehicleKind || trip?.route.vehicleKind,
+      trip?.route.ownerType ?? 0,
+      trip?.route.name ?? '',
+    );
+    const seats = booking?.seatCount;
+    const amount = booking ? Number(booking.totalAmount) : NaN;
+
+    return {
+      id: item.id,
+      userId: item.userId,
+      tripId: item.tripId,
+      subject: item.subject,
+      status: item.status,
+      closedAt: item.closedAt,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      isDeleted: item.isDeleted,
+      seatsLabel:
+        seats == null ? undefined : seats === 1 ? '1 مقعد' : `${seats} مقاعد`,
+      paymentLabel:
+        booking == null || !Number.isFinite(amount)
+          ? undefined
+          : `${this.money(amount)} ج.م - ${this.payMethod(booking.paymentMethod)}`,
+      trip: trip
+        ? {
+            id: trip.id,
+            from,
+            to,
+            vehicleType: vehicle.vehicleType,
+            vehicleAssetKey: vehicle.vehicleAssetKey,
+            dateTimeLabel: this.cairoLabel(trip.scheduledAt),
+            tripDate: trip.scheduledAt.toISOString(),
+            status: 'upcoming',
+            referenceCode: booking?.referenceCode || trip.referenceCode,
+            startLatitude: trip.route.startLatitude,
+            startLongitude: trip.route.startLongitude,
+            endLatitude: trip.route.endLatitude,
+            endLongitude: trip.route.endLongitude,
+          }
+        : null,
+    };
+  }
+
+  private vehiclePresentation(
+    kind: string | null | undefined,
+    ownerType: number,
+    routeName: string,
+  ) {
+    const token = (kind ?? '').trim().toLowerCase();
+    const asset =
+      token === 'bus' || token === 'coach'
+        ? 'bus'
+        : token === 'minibus' || token === 'microbus' || token === 'micro'
+          ? 'minibus'
+          : 'car';
+    if (ownerType === 1 && routeName.trim()) {
+      return { vehicleType: routeName.trim(), vehicleAssetKey: asset };
+    }
+    if (asset === 'minibus') {
+      return {
+        vehicleType: 'سيارة مشوار خاصة - ميني باص',
+        vehicleAssetKey: 'minibus',
+      };
+    }
+    if (asset === 'bus') {
+      return { vehicleType: 'اتوبيس شاتيل', vehicleAssetKey: 'bus' };
+    }
+    return { vehicleType: 'عربية شاتيل', vehicleAssetKey: 'car' };
+  }
+
+  private money(value: number) {
+    return Number.isInteger(value) ? String(value) : value.toFixed(2);
+  }
+
+  private payMethod(raw: string) {
+    const value = raw.trim().toLowerCase();
+    if (value === 'cash' || value === 'cod') return 'نقدا';
+    if (value === 'wallet') return 'محفظة';
+    if (value === 'card') return 'بطاقة';
+    if (value === 'subscription') return 'باقة';
+    return 'نقدا';
+  }
+
+  private cairoLabel(date: Date) {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Africa/Cairo',
+      weekday: 'short',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(date);
+    const pick = (type: Intl.DateTimeFormatPartTypes) =>
+      parts.find((part) => part.type === type)?.value ?? '';
+    const weekdays: Record<string, string> = {
+      Sun: 'الأحد',
+      Mon: 'الإثنين',
+      Tue: 'الثلاثاء',
+      Wed: 'الأربعاء',
+      Thu: 'الخميس',
+      Fri: 'الجمعة',
+      Sat: 'السبت',
+    };
+    const day = weekdays[pick('weekday')] ?? '';
+    return `${day} ${pick('year')}/${pick('month')}/${pick('day')} - ${pick('hour')}:${pick('minute')}`;
   }
 
   private async existingTripId(raw?: string) {

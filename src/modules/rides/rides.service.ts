@@ -13,6 +13,7 @@ import { newId, utcNow } from '../../common/utils/date.util';
 import { money, refCode, requireCash, splitEarnings } from '../../common/utils/money';
 import { rideStatusLabel } from '../../common/utils/enums-map';
 import { FareService } from '../pricing/fare.service';
+import { publishRiderHistoryChange } from '../realtime/rider-history-signal';
 
 @Injectable()
 export class RidesService {
@@ -219,6 +220,11 @@ export class RidesService {
         updatedAt: utcNow(),
       },
       include: rideInclude,
+    });
+    publishRiderHistoryChange({
+      userId: updated.riderUserId,
+      product: 'ride',
+      id: updated.id,
     });
     const kinds = await this.requestedVehicleKinds([updated.id]);
     return this.mapRide(updated, kinds.get(updated.id) ?? null);

@@ -831,3 +831,57 @@ model CancellationRequest {
   @@index([status], map: "IX_CancellationRequestsSet_Status")
   @@map("CancellationRequestsSet")
 }
+
+/// One card per shuttle trip, ride, or group. Passenger visibility stays on
+/// BookingsSet, RideRequestsSet.RiderUserId, and GroupMembersSet.
+model TripHistoryReadModel {
+  id                   String    @id(map: "PK_TripHistoryReadModel") @default(uuid()) @map("Id") @db.Uuid
+  sourceType           String    @map("SourceType") @db.VarChar(16)
+  sourceId             String    @map("SourceId") @db.Uuid
+  originName           String?   @map("OriginName") @db.VarChar(512)
+  originLatitude       Float?    @map("OriginLatitude")
+  originLongitude      Float?    @map("OriginLongitude")
+  destinationName      String?   @map("DestinationName") @db.VarChar(512)
+  destinationLatitude  Float?    @map("DestinationLatitude")
+  destinationLongitude Float?    @map("DestinationLongitude")
+  departureAt          DateTime  @map("DepartureAt") @db.Timestamptz(6)
+  status               Int       @map("Status")
+  driverId             String?   @map("DriverId") @db.Uuid
+  driverUserId         String?   @map("DriverUserId") @db.Uuid
+  driverName           String?   @map("DriverName") @db.VarChar(256)
+  driverPhotoUrl       String?   @map("DriverPhotoUrl")
+  vehicleKind          String?   @map("VehicleKind") @db.VarChar(40)
+  vehicleModel         String?   @map("VehicleModel") @db.VarChar(128)
+  vehicleColor         String?   @map("VehicleColor") @db.VarChar(64)
+  plateNumber          String?   @map("PlateNumber") @db.VarChar(32)
+  vehicleSummary       String?   @map("VehicleSummary") @db.VarChar(256)
+  fareAmount           Decimal?  @map("FareAmount") @db.Decimal(18, 2)
+  totalAmount          Decimal?  @map("TotalAmount") @db.Decimal(18, 2)
+  currency             String    @default("EGP") @map("Currency") @db.VarChar(3)
+  syncedAt             DateTime  @map("SyncedAt") @db.Timestamptz(6)
+  isDeleted            Boolean   @map("IsDeleted")
+  startedAt            DateTime? @map("StartedAt") @db.Timestamptz(6)
+  sourceCreatedAt      DateTime  @map("SourceCreatedAt") @db.Timestamptz(6)
+  scheduledFor         DateTime? @map("ScheduledFor") @db.Timestamptz(6)
+  referenceCode        String?   @map("ReferenceCode") @db.VarChar(64)
+  routeName            String?   @map("RouteName") @db.VarChar(256)
+  ownerType            Int?      @map("OwnerType")
+  routeVehicleKind     String?   @map("RouteVehicleKind") @db.VarChar(40)
+  requestedVehicleKind String?   @map("RequestedVehicleKind") @db.VarChar(40)
+  paymentMethod        String?   @map("PaymentMethod") @db.VarChar(32)
+  capacity             Int?      @map("Capacity")
+  routeId              String?   @map("RouteId") @db.Uuid
+  routeStartLatitude   Float?    @map("RouteStartLatitude")
+  routeStartLongitude  Float?    @map("RouteStartLongitude")
+  routeEndLatitude     Float?    @map("RouteEndLatitude")
+  routeEndLongitude    Float?    @map("RouteEndLongitude")
+  driverRatingAverage  Decimal?  @map("DriverRatingAverage") @db.Decimal(18, 2)
+  driverRatingCount    Int?      @map("DriverRatingCount")
+
+  @@unique([sourceType, sourceId], map: "UX_TripHistoryReadModel_Source")
+  @@index([sourceType, isDeleted, departureAt], map: "IX_TripHistoryReadModel_Source_Departure")
+  @@index([driverId], map: "IX_TripHistoryReadModel_DriverId")
+  @@index([driverUserId], map: "IX_TripHistoryReadModel_DriverUserId")
+  @@index([routeId], map: "IX_TripHistoryReadModel_RouteId")
+  @@map("TripHistoryReadModel")
+}
