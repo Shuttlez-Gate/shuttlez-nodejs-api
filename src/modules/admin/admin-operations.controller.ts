@@ -25,6 +25,11 @@ import { newId, utcNow } from '../../common/utils/date.util';
 import { baseFields } from '../../common/utils/entity-defaults';
 import { money, refCode } from '../../common/utils/money';
 import {
+  CAPTAIN_TRIP_LOCK_CLASS,
+  departureSlotFor,
+  isDepartureSlotConflict,
+} from '../marketplace/departure-slot';
+import {
   bookingStatusLabel,
   invoiceStatusLabel,
   parseBookingStatus,
@@ -532,26 +537,76 @@ export class AdminTripsController {
         });
       }
     }
-    await this.prisma.$transaction(async (tx) => {
-      for (const scheduledAt of instants) {
-        await tx.trip.create({
-          data: {
-            id: newId(),
-            routeId: body.routeId,
-            driverId: body.driverId,
-            status: body.driverId
-              ? TripStatus.DriverAssigned
-              : TripStatus.Scheduled,
-            scheduledAt,
-            pricePerSeat: new Prisma.Decimal(pricePerSeat),
-            availableSeats,
-            referenceCode: refCode('TR'),
-            ...baseFields(),
-          },
-        });
-      }
+    const created = await this.insertScheduledTrips(route, instants, {
+      driverId: body.driverId,
+      pricePerSeat,
+      availableSeats,
     });
-    return ApiResponse.ok(instants.length, 'تم جدولة الرحلات');
+    return ApiResponse.ok(created, 'تم جدولة الرحلات');
+  }
+
+  private async insertScheduledTrips(
+    route: { id: string; ownerType: number },
+    instants: Date[],
+    input: { driverId?: string; pricePerSeat: number; availableSeats: number },
+  ) {
+    const write = () =>
+      this.prisma.$transaction(async (tx) => {
+        const captainRoute = route.ownerType === RouteOwnerType.Captain;
+        const taken = new Set<string>();
+        if (captainRoute) {
+          await tx.$executeRaw`
+            SELECT pg_advisory_xact_lock(CAST(${CAPTAIN_TRIP_LOCK_CLASS} AS integer), hashtext(${route.id}))`;
+          const existing = await tx.trip.findMany({
+            where: {
+              routeId: route.id,
+              isDeleted: false,
+              status: { not: TripStatus.Cancelled },
+            },
+            select: { scheduledAt: true, departureSlot: true },
+          });
+          for (const trip of existing) {
+            taken.add(trip.departureSlot || departureSlotFor(trip.scheduledAt));
+          }
+        }
+        let created = 0;
+        for (const scheduledAt of instants) {
+          const departureSlot = captainRoute ? departureSlotFor(scheduledAt) : null;
+          if (departureSlot && taken.has(departureSlot)) continue;
+          await tx.trip.create({
+            data: {
+              id: newId(),
+              routeId: route.id,
+              driverId: input.driverId,
+              status: input.driverId ? TripStatus.DriverAssigned : TripStatus.Scheduled,
+              scheduledAt,
+              pricePerSeat: new Prisma.Decimal(input.pricePerSeat),
+              availableSeats: input.availableSeats,
+              referenceCode: refCode('TR'),
+              departureSlot,
+              ...baseFields(),
+            },
+          });
+          if (departureSlot) taken.add(departureSlot);
+          created += 1;
+        }
+        return created;
+      });
+    try {
+      return await write();
+    } catch (error) {
+      if (!isDepartureSlotConflict(error)) throw error;
+    }
+    try {
+      return await write();
+    } catch (error) {
+      if (!isDepartureSlotConflict(error)) throw error;
+      throw new AppException(
+        'توجد رحلة على نفس المسار في هذا الموعد',
+        400,
+        ErrorCodes.DuplicateOperationalTrip,
+      );
+    }
   }
 
   private async saveTrip(id: string | null, body: SaveTripBody) {
@@ -564,51 +619,94 @@ export class AdminTripsController {
       throw new AppException('عدد المقاعد المتاحة مطلوب ويجب أن يكون 1 على الأقل', 400);
     }
     const status = parseTripStatus(body.status) ?? TripStatus.Scheduled;
+    const route = await this.prisma.route.findFirst({
+      where: { id: body.routeId, isDeleted: false },
+    });
+    if (!route) {
+      throw new NotFoundException('المسار غير موجود', ErrorCodes.RouteNotFound);
+    }
     if (body.driverId) {
-      const route = await this.prisma.route.findFirst({
-        where: { id: body.routeId, isDeleted: false },
-      });
       await assertCaptainEligible(this.prisma, {
         driverId: body.driverId,
-        requiredVehicleKind: route?.vehicleKind,
+        requiredVehicleKind: route.vehicleKind,
         at: new Date(body.scheduledAt),
-        durationSeconds: route?.durationSeconds,
+        durationSeconds: route.durationSeconds,
         excludeTripId: id,
       });
     }
-    if (id) {
-      await this.requireTrip(id);
-      const updated = await this.prisma.trip.update({
-        where: { id },
-        data: {
-          routeId: body.routeId,
-          driverId: body.driverId,
-          scheduledAt: new Date(body.scheduledAt),
-          pricePerSeat: new Prisma.Decimal(pricePerSeat),
-          availableSeats,
-          status,
-          referenceCode: body.referenceCode,
-          updatedAt: utcNow(),
-        },
-        include: tripInclude,
+    const scheduledAt = new Date(body.scheduledAt);
+    const captainRoute = route.ownerType === RouteOwnerType.Captain;
+    const departureSlot =
+      captainRoute && status !== TripStatus.Cancelled ? departureSlotFor(scheduledAt) : null;
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        if (captainRoute && departureSlot) {
+          await tx.$executeRaw`
+            SELECT pg_advisory_xact_lock(CAST(${CAPTAIN_TRIP_LOCK_CLASS} AS integer), hashtext(${route.id}))`;
+          const existing = await tx.trip.findMany({
+            where: {
+              routeId: route.id,
+              isDeleted: false,
+              status: { not: TripStatus.Cancelled },
+              ...(id ? { id: { not: id } } : {}),
+            },
+            select: { scheduledAt: true, departureSlot: true },
+          });
+          const taken = existing.some(
+            (trip) => (trip.departureSlot || departureSlotFor(trip.scheduledAt)) === departureSlot,
+          );
+          if (taken) {
+            throw new AppException(
+              'توجد رحلة على نفس المسار في هذا الموعد',
+              400,
+              ErrorCodes.DuplicateOperationalTrip,
+            );
+          }
+        }
+        if (id) {
+          await this.requireTrip(id);
+          const updated = await tx.trip.update({
+            where: { id },
+            data: {
+              routeId: body.routeId,
+              driverId: body.driverId,
+              scheduledAt,
+              pricePerSeat: new Prisma.Decimal(pricePerSeat),
+              availableSeats,
+              status,
+              referenceCode: body.referenceCode,
+              departureSlot,
+              updatedAt: utcNow(),
+            },
+            include: tripInclude,
+          });
+          return mapTrip(updated);
+        }
+        const created = await tx.trip.create({
+          data: {
+            id: newId(),
+            routeId: body.routeId,
+            driverId: body.driverId,
+            scheduledAt,
+            pricePerSeat: new Prisma.Decimal(pricePerSeat),
+            availableSeats,
+            status,
+            referenceCode: body.referenceCode ?? refCode('TR'),
+            departureSlot,
+            ...baseFields(),
+          },
+          include: tripInclude,
+        });
+        return mapTrip(created);
       });
-      return mapTrip(updated);
+    } catch (error) {
+      if (!isDepartureSlotConflict(error)) throw error;
+      throw new AppException(
+        'توجد رحلة على نفس المسار في هذا الموعد',
+        400,
+        ErrorCodes.DuplicateOperationalTrip,
+      );
     }
-    const created = await this.prisma.trip.create({
-      data: {
-        id: newId(),
-        routeId: body.routeId,
-        driverId: body.driverId,
-        scheduledAt: new Date(body.scheduledAt),
-        pricePerSeat: new Prisma.Decimal(pricePerSeat),
-        availableSeats,
-        status,
-        referenceCode: body.referenceCode ?? refCode('TR'),
-        ...baseFields(),
-      },
-      include: tripInclude,
-    });
-    return mapTrip(created);
   }
 
   private async requireTrip(id: string) {

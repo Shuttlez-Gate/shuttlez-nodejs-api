@@ -70,9 +70,26 @@ export class RidesController {
   async cancel(@Param('rideId') rideId: string) {
     return ApiResponse.ok(await this.rides.cancel(rideId), 'تم إلغاء المشوار');
   }
+
+  @Post(':rideId/terminate')
+  async terminate(
+    @Param('rideId') rideId: string,
+    @Body() body: { action: 'request' | 'accept' | 'reject'; reason?: string; latitude?: number; longitude?: number },
+  ) {
+    return ApiResponse.ok(
+      await this.rides.handleEarlyTermination(
+        rideId,
+        body.action,
+        body.reason,
+        body.latitude,
+        body.longitude,
+      ),
+    );
+  }
 }
 
-function num(value?: string): number | undefined {
+
+  function num(value?: string): number | undefined {
   if (value == null || value === '') {
     return undefined;
   }

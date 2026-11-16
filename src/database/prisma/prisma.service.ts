@@ -1,4 +1,5 @@
-import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '@prisma/client';
 
 @Injectable()
@@ -6,8 +7,44 @@ export class PrismaService
   extends PrismaClient
   implements OnModuleInit, OnModuleDestroy
 {
+  private readonly logger = new Logger(PrismaService.name);
+
+  constructor() {
+    const connectionString = process.env.DATABASE_URL;
+    // The bundled Prisma engine cannot open this Neon endpoint from this
+    // machine. node-pg can, so queries go through that driver.
+    super(
+      connectionString
+        ? { adapter: new PrismaPg({ connectionString }) }
+        : undefined,
+    );
+  }
+
   async onModuleInit(): Promise<void> {
-    await this.$connect();
+    const maxRetries = 5;
+    const retryDelay = 2000;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await this.$connect();
+        this.logger.log('Successfully connected to database.');
+        return;
+       } catch (err: unknown) {
+        const errorMessage =
+          err instanceof Error ? err.message : String(err);
+
+        if (attempt === maxRetries) {
+          this.logger.error(
+            `Failed to connect to database after ${maxRetries} attempts: ${errorMessage}`,
+          );
+          throw err;
+        }
+
+        this.logger.warn(
+          `Database connection attempt ${attempt}/${maxRetries} failed (${errorMessage}). Retrying in ${retryDelay / 1000}s (database might be waking up)...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, retryDelay));
+      }
+    }
   }
 
   async onModuleDestroy(): Promise<void> {

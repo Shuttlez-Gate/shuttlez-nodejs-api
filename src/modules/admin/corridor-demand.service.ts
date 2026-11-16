@@ -191,6 +191,7 @@ export class CorridorDemandService {
             pricePerSeat: new Prisma.Decimal(price),
             availableSeats: proposal.availableSeats,
             referenceCode: refCode('TRP'),
+            departureSlot: null,
             ...baseFields(now),
           },
         });

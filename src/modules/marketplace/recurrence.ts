@@ -2,7 +2,7 @@ import { RecurrenceKind } from '../../common/enums';
 import { AppException } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/error-codes';
 import {
-  addOperationalDays,
+  addOperationalMonths,
   DEFAULT_OPERATIONAL_TIMEZONE,
   enumerateOperationalSchedule,
   getZonedParts,
@@ -105,7 +105,7 @@ export function occurrenceDates(input: {
       );
     }
   } else if (!until) {
-    until = addOperationalDays(from, 8 * 7, timeZone);
+    until = addOperationalMonths(from, 1, timeZone);
   }
 
   const wall = getZonedParts(time, timeZone);

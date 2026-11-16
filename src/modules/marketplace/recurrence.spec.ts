@@ -1,5 +1,10 @@
 import { RecurrenceKind } from '../../common/enums';
-import { getZonedParts, operationalWeekday, zonedWallTimeToUtc } from '../../common/utils/operational-clock';
+import {
+  addOperationalMonths,
+  getZonedParts,
+  operationalWeekday,
+  zonedWallTimeToUtc,
+} from '../../common/utils/operational-clock';
 import { cairoDateKey } from '../bookings/rider-history-bucket';
 import { occurrenceDates, parseDaysOfWeek, parseRecurrenceKind, daysForScheduleType } from './recurrence';
 import { instancesOnDate } from './route-match';
@@ -64,15 +69,17 @@ describe('recurrence', () => {
     ]);
   });
 
-  it('weekly uses selected weekdays and caps at 60', () => {
+  it('weekly stays inside one month and caps at 60', () => {
     const at = new Date('2026-09-14T08:30:00.000Z');
     const dates = occurrenceDates({
       kind: RecurrenceKind.Weekly,
       scheduledAt: at,
       daysOfWeek: parseDaysOfWeek([1, 3]),
     });
-    expect(dates.length).toBeGreaterThan(0);
+    const until = addOperationalMonths(at, 1, 'Africa/Cairo');
+    expect(dates.length).toBe(10);
     expect(dates.length).toBeLessThanOrEqual(60);
+    expect(dates[dates.length - 1].getTime()).toBeLessThanOrEqual(until.getTime());
     const wall = getZonedParts(at, 'Africa/Cairo');
     expect(
       dates.every((date) => {

@@ -33,6 +33,11 @@ export class CurrentUserService {
     return this.jwtUser.role;
   }
 
+  get sessionId(): string | undefined {
+    const sid = (this.request.user as { sid?: unknown } | undefined)?.sid;
+    return typeof sid === 'string' && sid.length > 0 ? sid : undefined;
+  }
+
   get isAdmin(): boolean {
     return this.role?.toLowerCase() === 'admin';
   }

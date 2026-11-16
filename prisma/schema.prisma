@@ -29,6 +29,8 @@ model User {
   isDeleted                   Boolean         @map("IsDeleted")
   facebookProviderId          String?         @map("FacebookProviderId")
   googleProviderId            String?         @map("GoogleProviderId")
+  firebasePhoneUid            String?         @unique(map: "IX_UsersSet_FirebasePhoneUid") @map("FirebasePhoneUid")
+  passwordHash                String?         @map("PasswordHash") @db.VarChar(255)
   activeSubscriptionPackageId String?         @map("ActiveSubscriptionPackageId") @db.Uuid
   subscriptionExpiresAt       DateTime?       @map("SubscriptionExpiresAt") @db.Timestamptz(6)
   subscriptionActivatedAt     DateTime?       @map("SubscriptionActivatedAt") @db.Timestamptz(6)
@@ -72,6 +74,8 @@ model RefreshToken {
   revokedAt       DateTime? @map("RevokedAt") @db.Timestamptz(6)
   replacedByToken String?   @map("ReplacedByToken")
   createdByIp     String?   @map("CreatedByIp")
+  deviceId        String?   @map("DeviceId") @db.VarChar(128)
+  platform        String?   @map("Platform") @db.VarChar(32)
   createdAt       DateTime  @map("CreatedAt") @db.Timestamptz(6)
   updatedAt       DateTime? @map("UpdatedAt") @db.Timestamptz(6)
   isDeleted       Boolean   @map("IsDeleted")
@@ -132,6 +136,7 @@ model Driver {
   trips                 Trip[]
   ownedRoutes           Route[]
   cancellationRequests  CancellationRequest[]
+  commissionPayments    CaptainCommissionPayment[]
 
   @@index([vehicleId], map: "IX_DriversSet_VehicleId")
   @@map("DriversSet")
@@ -242,6 +247,11 @@ model Trip {
   updatedAt            DateTime?               @map("UpdatedAt") @db.Timestamptz(6)
   isDeleted            Boolean                 @map("IsDeleted")
   parentTripId         String?                 @map("ParentTripId") @db.Uuid
+  // Cairo minute slot for a captain-route occurrence. Null on platform trips.
+  // Uniqueness is the partial index UX_TripsSet_Route_DepartureSlot, applied
+  // from prisma/sql/20261027_captain_trip_departure_slot.sql. A full Prisma
+  // @@unique would block regenerating a cancelled departure.
+  departureSlot        String?                 @map("DepartureSlot") @db.VarChar(32)
   recurrenceKind       Int                     @default(0) @map("RecurrenceKind")
   recurrenceDaysOfWeek String?                 @map("RecurrenceDaysOfWeek") @db.VarChar(32)
   recurrenceStartDate  DateTime?               @map("RecurrenceStartDate") @db.Date
@@ -884,4 +894,23 @@ model TripHistoryReadModel {
   @@index([driverUserId], map: "IX_TripHistoryReadModel_DriverUserId")
   @@index([routeId], map: "IX_TripHistoryReadModel_RouteId")
   @@map("TripHistoryReadModel")
+}
+
+model CaptainCommissionPayment {
+  id                String    @id(map: "PK_CaptainCommissionPaymentsSet") @map("Id") @db.Uuid
+  driverId          String    @map("DriverId") @db.Uuid
+  amount            Decimal   @map("Amount") @db.Decimal(18, 2)
+  senderPhone       String    @map("SenderPhone") @db.VarChar(20)
+  receiptStorage    String    @map("ReceiptStorage")
+  status            Int       @map("Status")
+  confirmedAt       DateTime? @map("ConfirmedAt") @db.Timestamptz(6)
+  confirmedByUserId String?   @map("ConfirmedByUserId") @db.Uuid
+  createdAt         DateTime  @map("CreatedAt") @db.Timestamptz(6)
+  updatedAt         DateTime? @map("UpdatedAt") @db.Timestamptz(6)
+  isDeleted         Boolean   @map("IsDeleted")
+  driver            Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_CaptainCommissionPaymentsSet_DriversSet_DriverId")
+
+  @@index([driverId], map: "IX_CaptainCommissionPaymentsSet_DriverId")
+  @@index([status, createdAt], map: "IX_CaptainCommissionPaymentsSet_Status_CreatedAt")
+  @@map("CaptainCommissionPaymentsSet")
 }

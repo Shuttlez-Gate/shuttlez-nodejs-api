@@ -30,7 +30,6 @@ import { FareService } from '../pricing/fare.service';
 import { SegmentInventoryService } from '../marketplace/segment-inventory.service';
 import { PushNotificationService } from '../marketplace/push-notification.service';
 import {
-  matchOriginDestination,
   remainingForRange,
   segmentPrice,
 } from '../marketplace/segment-occupancy';
@@ -38,6 +37,7 @@ import { loadRiderHistoryPage } from './rider-history-page';
 import { publishRiderHistoryChange } from '../realtime/rider-history-signal';
 import { riderHistoryBucket } from './rider-history-bucket';
 import { isSelfOwnedTrip, tripsNotOwnedByViewer } from '../marketplace/self-booking';
+import { matchPreviewStops } from '../marketplace/route-match';
 
 @ApiTags('bookings')
 @Controller('api/v1/bookings')
@@ -72,10 +72,26 @@ export class BookingsController {
     const hasCoords =
       originLat != null && originLng != null && destLat != null && destLng != null;
 
+    const viewerBookings = viewerId
+      ? await this.prisma.booking.findMany({
+          where: {
+            userId: viewerId,
+            isDeleted: false,
+            status: { in: [BookingStatus.Pending, BookingStatus.Confirmed] },
+          },
+          select: { tripId: true },
+        })
+      : [];
+    const bookedTripIds = [...new Set(viewerBookings.map((booking) => booking.tripId))];
+    const bookedSet = new Set(bookedTripIds);
+
     const platformTrips = await this.prisma.trip.findMany({
       where: {
         isDeleted: false,
-        availableSeats: { gt: 0 },
+        OR: [
+          { availableSeats: { gt: 0 } },
+          ...(bookedTripIds.length > 0 ? [{ id: { in: bookedTripIds } }] : []),
+        ],
         status: { in: [TripStatus.Scheduled, TripStatus.DriverAssigned] },
         scheduledAt: { gte: now, lte: until },
         route: {
@@ -84,7 +100,14 @@ export class BookingsController {
         },
         ...notOwn,
       },
-      include: { route: { include: { stops: { where: { isDeleted: false } } } } },
+      include: {
+        route: {
+          include: {
+            stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
+          },
+        },
+        driver: { select: { vehicleKind: true, seats: true } },
+      },
       orderBy: { scheduledAt: 'asc' },
       take: 50,
     });
@@ -129,14 +152,15 @@ export class BookingsController {
     const offers: PreviewOffer[] = [];
     for (const trip of platformTrips) {
       const stops = trip.route.stops ?? [];
-      if (hasCoords) {
-        const match = matchOriginDestination(
-          stops,
-          originLat,
-          originLng,
-          destLat,
-          destLng,
-        );
+      if (hasCoords || sourceAddress || destinationAddress) {
+        const match = matchPreviewStops(stops, {
+          fromLatitude: originLat,
+          fromLongitude: originLng,
+          toLatitude: destLat,
+          toLongitude: destLng,
+          fromAddress: sourceAddress,
+          toAddress: destinationAddress,
+        });
         if (!match) {
           continue;
         }
@@ -153,10 +177,10 @@ export class BookingsController {
           ),
           originStopId: match.origin.id,
           destinationStopId: match.destination.id,
-          vehicleKind: trip.route.vehicleKind ?? null,
+          vehicleKind: trip.route.vehicleKind ?? trip.driver?.vehicleKind ?? null,
           vehicleBucket: classifyVehicle(
-            trip.route.vehicleKind,
-            trip.route.capacity,
+            trip.route.vehicleKind ?? trip.driver?.vehicleKind,
+            trip.route.capacity ?? trip.driver?.seats,
             trip.availableSeats,
           ),
         });
@@ -183,13 +207,14 @@ export class BookingsController {
 
     if (hasCoords) {
       for (const trip of captainTrips) {
-        const match = matchOriginDestination(
-          trip.route.stops,
-          originLat,
-          originLng,
-          destLat,
-          destLng,
-        );
+        const match = matchPreviewStops(trip.route.stops, {
+          fromLatitude: originLat,
+          fromLongitude: originLng,
+          toLatitude: destLat,
+          toLongitude: destLng,
+          fromAddress: sourceAddress,
+          toAddress: destinationAddress,
+        });
         if (!match) {
           continue;
         }
@@ -198,7 +223,8 @@ export class BookingsController {
           match.origin.order,
           match.destination.order,
         );
-        if (remaining < 1) {
+        const alreadyBooked = bookedSet.has(trip.id);
+        if (remaining < 1 && !alreadyBooked) {
           continue;
         }
         const firstOrder = trip.route.stops[0]?.order ?? 0;
@@ -231,7 +257,8 @@ export class BookingsController {
           seatsLabel: `${remaining} مقاعد`,
           seatsArgb: 0,
           seatsStrikethrough: false,
-          cardDimmed: false,
+          cardDimmed: alreadyBooked,
+          alreadyBooked,
           pricePerSeat: price,
           availableSeats: remaining,
           originStopId: match.origin.id,
@@ -247,6 +274,12 @@ export class BookingsController {
           scheduledAt: trip.scheduledAt,
         });
       }
+    }
+
+    for (const offer of offers) {
+      if (!bookedSet.has(offer.id)) continue;
+      offer.alreadyBooked = true;
+      offer.cardDimmed = true;
     }
 
     const requestedVehicle = previewVehicleBucket(vehicleTypeIndex);
@@ -1109,6 +1142,7 @@ function platformOffer(
     seatsArgb: 0,
     seatsStrikethrough: false,
     cardDimmed: false,
+    alreadyBooked: false,
     pricePerSeat: money(trip.pricePerSeat),
     availableSeats: trip.availableSeats,
     sourceType: 'platform',

@@ -43,6 +43,16 @@ export function calculateTotal(pricePerSeat: number, seatCount: number): number 
   return normalizeMoney(pricePerSeat * seatCount);
 }
 
+export function platformCut(totalAmount: number, percent = DEFAULT_PLATFORM_COMMISSION_PERCENT) {
+  const total = normalizeMoney(Math.max(0, totalAmount));
+  const split = splitEarnings(total, percent);
+  return {
+    total,
+    appCommission: split.commissionAmount,
+    captainEarnings: split.captainEarnings,
+  };
+}
+
 export function splitEarnings(
   totalAmount: number,
   platformCommissionPercent: number,

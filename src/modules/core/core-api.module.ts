@@ -11,6 +11,8 @@ import { GroupsService } from '../groups/groups.service';
 import { GroupsController } from '../groups/groups.controller';
 import { DriversService } from '../drivers/drivers.service';
 import { DriversController } from '../drivers/drivers.controller';
+import { CaptainPaymentsService } from '../drivers/captain-payments.service';
+import { AdminCommissionPaymentsController } from '../admin/admin-commission-payments.controller';
 import { CaptainRoutesController } from '../marketplace/captain-routes.controller';
 import { CaptainRoutesService } from '../marketplace/captain-routes.service';
 import { SegmentInventoryService } from '../marketplace/segment-inventory.service';
@@ -108,12 +110,14 @@ import { RealtimeModule } from '../realtime/realtime.module';
     AdminRidesController,
     AdminGroupsController,
     AdminDashboardController,
+    AdminCommissionPaymentsController,
   ],
   providers: [
     FareService,
     RidesService,
     GroupsService,
     DriversService,
+    CaptainPaymentsService,
     CaptainRoutesService,
     SegmentInventoryService,
     PushNotificationService,

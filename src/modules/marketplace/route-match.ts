@@ -58,6 +58,33 @@ export function journeyRequested(query: JourneyQuery): boolean {
  * Coordinates use the existing 600m stop radius.
  * Names are used only when coordinates were not sent, and both ends must match.
  */
+/**
+ * Booking preview: a pin within 600m wins.
+ * If the pin is farther, the written place names can still match the stop
+ * (حلوان → مدينة نصر is often kilometers from the stored stop pin).
+ */
+export function matchPreviewStops(
+  stops: OrderedStop[],
+  query: JourneyQuery,
+): { origin: OrderedStop; destination: OrderedStop } | null {
+  const ordered = [...stops].sort((a, b) => a.order - b.order);
+  if (hasJourneyCoordinates(query)) {
+    const byCoords = matchOriginDestination(
+      ordered,
+      query.fromLatitude as number,
+      query.fromLongitude as number,
+      query.toLatitude as number,
+      query.toLongitude as number,
+      MATCH_RADIUS_METERS,
+    );
+    if (byCoords) return byCoords;
+  }
+  return matchRouteToJourney(ordered, {
+    fromAddress: query.fromAddress,
+    toAddress: query.toAddress,
+  });
+}
+
 export function matchRouteToJourney(
   stops: OrderedStop[],
   query: JourneyQuery,

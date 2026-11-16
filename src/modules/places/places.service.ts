@@ -156,12 +156,11 @@ export class PlacesService {
   } | null> {
     const id = placeId.trim();
     if (!id) return null;
-    if (
-      id.startsWith('nominatim:') ||
-      id.startsWith('photon:') ||
-      id.startsWith('local:')
-    ) {
-      return null;
+    if (id.startsWith('nominatim:')) {
+      return this.nominatimDetails(id.substring('nominatim:'.length));
+    }
+    if (id.startsWith('photon:') || id.startsWith('local:')) {
+      return parseLatLngId(id.substring(id.indexOf(':') + 1));
     }
     if (!this.hasGoogleKey()) return null;
 
@@ -269,7 +268,108 @@ export class PlacesService {
     };
   }
 
+  /// تحويل معرف OpenStreetMap إلى إحداثيات (يدعم أيضاً صيغة "lat,lng").
+  private async nominatimDetails(
+    raw: string,
+  ): Promise<{ lat: number; lng: number; name: string | null } | null> {
+    const direct = parseLatLngId(raw);
+    if (direct) return direct;
+    if (!/^\d+$/.test(raw)) return null;
+    try {
+      const params = new URLSearchParams({
+        place_id: raw,
+        format: 'json',
+        'accept-language': 'ar',
+      });
+      const res = await fetch(`https://nominatim.openstreetmap.org/details?${params}`, {
+        headers: { 'User-Agent': 'ShuttlezAdmin/1.0 (admin.shuttlez.org)' },
+      });
+      if (!res.ok) return null;
+      const data = (await res.json()) as {
+        localname?: string;
+        names?: Record<string, string>;
+        centroid?: { coordinates?: [number, number] };
+      };
+      const coords = data.centroid?.coordinates;
+      if (!coords || coords.length < 2) return null;
+      const [lng, lat] = coords;
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      return {
+        lat,
+        lng,
+        name: data.names?.['name:ar'] || data.localname || data.names?.name || null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   async drivingRoute(input: {
+    originLat: number;
+    originLng: number;
+    destLat: number;
+    destLng: number;
+    waypoints?: Array<{ lat: number; lng: number }>;
+  }): Promise<{
+    points: Array<{ latitude: number; longitude: number }>;
+    durationSeconds: number;
+    distanceMeters: number;
+  }> {
+    if (this.hasGoogleKey()) {
+      try {
+        const google = await this.googleDrivingRoute(input);
+        if (google.points.length >= 2) return google;
+      } catch {
+        // Fall through to OSRM.
+      }
+    }
+    return this.osrmDrivingRoute(input);
+  }
+
+  /// مسار قيادة مجاني من OSRM عند غياب مفتاح Google أو فشله.
+  private async osrmDrivingRoute(input: {
+    originLat: number;
+    originLng: number;
+    destLat: number;
+    destLng: number;
+    waypoints?: Array<{ lat: number; lng: number }>;
+  }): Promise<{
+    points: Array<{ latitude: number; longitude: number }>;
+    durationSeconds: number;
+    distanceMeters: number;
+  }> {
+    const coords = [
+      { lat: input.originLat, lng: input.originLng },
+      ...(input.waypoints ?? []).filter(
+        (p) => Number.isFinite(p.lat) && Number.isFinite(p.lng),
+      ),
+      { lat: input.destLat, lng: input.destLng },
+    ]
+      .map((p) => `${p.lng},${p.lat}`)
+      .join(';');
+    const res = await fetch(
+      `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=polyline`,
+      { headers: { 'User-Agent': 'ShuttlezApi/1.0 (shuttlez.org)' } },
+    );
+    if (!res.ok) {
+      throw new ServiceUnavailableException(`Routing failed (${res.status})`);
+    }
+    const data = (await res.json()) as {
+      code?: string;
+      routes?: Array<{ geometry?: string; duration?: number; distance?: number }>;
+    };
+    const route = data.routes?.[0];
+    if (data.code !== 'Ok' || !route) {
+      return { points: [], durationSeconds: 0, distanceMeters: 0 };
+    }
+    return {
+      points: decodePolyline(route.geometry ?? ''),
+      durationSeconds: Math.round(route.duration ?? 0),
+      distanceMeters: Math.round(route.distance ?? 0),
+    };
+  }
+
+  private async googleDrivingRoute(input: {
     originLat: number;
     originLng: number;
     destLat: number;
@@ -332,6 +432,17 @@ export class PlacesService {
     );
     return { points, durationSeconds, distanceMeters };
   }
+}
+
+function parseLatLngId(
+  raw: string,
+): { lat: number; lng: number; name: string | null } | null {
+  const parts = raw.split(',').map((p) => Number(p.trim()));
+  if (parts.length !== 2) return null;
+  const [lat, lng] = parts;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  return { lat, lng, name: null };
 }
 
 function decodeRouteSteps(

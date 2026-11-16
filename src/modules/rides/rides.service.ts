@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { CurrentUserService } from '../../common/current-user.service';
@@ -13,8 +13,9 @@ import { newId, utcNow } from '../../common/utils/date.util';
 import { money, refCode, requireCash, splitEarnings } from '../../common/utils/money';
 import { rideStatusLabel } from '../../common/utils/enums-map';
 import { FareService } from '../pricing/fare.service';
+import { PlacesService } from '../places/places.service';
 import { publishRiderHistoryChange } from '../realtime/rider-history-signal';
-import { DriverGateway } from '../realtime/realtime.gateway';
+import { DriverGateway, RideTrackingGateway } from '../realtime/realtime.gateway';
 
 @Injectable()
 export class RidesService {
@@ -23,6 +24,8 @@ export class RidesService {
     private readonly currentUser: CurrentUserService,
     private readonly fare: FareService,
     private readonly driverGateway?: DriverGateway,
+    private readonly rideTrackingGateway?: RideTrackingGateway,
+    @Optional() private readonly places?: PlacesService,
   ) {}
 
   async quote(query: {
@@ -35,7 +38,7 @@ export class RidesService {
   }) {
     this.currentUser.requireUserId();
     const rule = await this.fare.resolveRideRule(query.fromZoneKey, query.toZoneKey);
-    const distanceKm = this.fare.distanceKm(
+    const distanceKm = await this.tripDistanceKm(
       query.pickupLatitude,
       query.pickupLongitude,
       query.destinationLatitude,
@@ -109,7 +112,7 @@ export class RidesService {
     const paymentMethod = requireCash(body.paymentMethod);
     const rule = await this.fare.resolveRideRule(body.fromZoneKey, body.toZoneKey);
     const platformPercent = await this.fare.platformCommissionPercent();
-    const distanceKm = this.fare.distanceKm(
+    const distanceKm = await this.tripDistanceKm(
       body.pickupLatitude,
       body.pickupLongitude,
       body.destinationLatitude,
@@ -119,6 +122,7 @@ export class RidesService {
     const split = splitEarnings(fareAmount, platformPercent);
     const perKm = money(rule.pricePerKm) > 0;
     const scheduledFor = parseScheduledFor(body.scheduledFor);
+    await this.closeAbandonedSearches(userId);
     const ride = await this.prisma.rideRequest.create({
       include: rideInclude,
       data: {
@@ -162,14 +166,24 @@ export class RidesService {
     try {
       const rider = await this.prisma.user.findFirst({
         where: { id: userId },
-        select: { fullName: true, phone: true },
+        select: {
+          fullName: true,
+          phone: true,
+          ratingAverage: true,
+          ratingCount: true,
+          avatarUrl: true,
+        },
       });
+      const tripKm = distanceKm ?? 2.5;
       this.driverGateway?.broadcastNewRide({
         id: ride.id,
         vehicleKind: requestedVehicleKind || 'car',
         passengerName: rider?.fullName || 'راكب شاتلز',
         passengerPhone: rider?.phone ?? null,
-        passengerRating: 4.9,
+        passengerRating: rider ? Number(rider.ratingAverage) : 4.9,
+        passengerRatingCount: rider?.ratingCount ?? 0,
+        passengerAvatarUrl: rider?.avatarUrl ?? null,
+        referenceCode: ride.referenceCode,
         pickupAddress: ride.pickupAddress || 'نقطة الانطلاق',
         dropoffAddress: ride.destinationAddress || 'الوجهة المحددة',
         pickupLatitude: ride.pickupLatitude,
@@ -177,14 +191,61 @@ export class RidesService {
         destinationLatitude: ride.destinationLatitude,
         destinationLongitude: ride.destinationLongitude,
         fare: money(ride.fareAmount),
+        earnings: money(ride.captainEarnings),
         distanceKm: distanceKm == null ? 2.5 : money(distanceKm),
-        etaMinutes: Math.max(3, Math.round((distanceKm ?? 2.5) * 2.5)),
+        tripDistanceKm: money(tripKm),
+        durationMinutes: Math.max(1, Math.round((tripKm / 30) * 60)),
+        etaMinutes: Math.max(3, Math.round(tripKm * 2.5)),
+        createdAt: ride.createdAt,
         paymentMethod: ride.paymentMethod || 'cash',
         timeoutSeconds: 30,
       });
-    } catch (_) {}
+    } catch {
+      // Intentionally swallowing unknown error
+    }
 
     return this.mapRide(ride, requestedVehicleKind);
+  }
+
+  /// A rider has one live search. An older Requested ride must not stay on
+  /// the home badge after they book again or finish a newer trip.
+  async closeAbandonedSearches(riderUserId: string, exceptRideId?: string) {
+    const now = utcNow();
+    const open = await this.prisma.rideRequest.findMany({
+      where: {
+        riderUserId,
+        isDeleted: false,
+        status: RideRequestStatus.Requested,
+        ...(exceptRideId ? { id: { not: exceptRideId } } : {}),
+        OR: [{ scheduledFor: null }, { scheduledFor: { lte: now } }],
+      },
+      select: { id: true },
+    });
+    if (open.length === 0) return;
+
+    const ids = open.map((ride) => ride.id);
+    await this.prisma.rideRequest.updateMany({
+      where: {
+        id: { in: ids },
+        status: RideRequestStatus.Requested,
+        isDeleted: false,
+      },
+      data: {
+        status: RideRequestStatus.Cancelled,
+        cancelledAt: now,
+        updatedAt: now,
+      },
+    });
+
+    for (const id of ids) {
+      this.driverGateway?.broadcastRideWithdrawn(id);
+      this.rideTrackingGateway?.publishRideCancelled(id, 'rider');
+      publishRiderHistoryChange({
+        userId: riderUserId,
+        product: 'ride',
+        id,
+      });
+    }
   }
 
   async mine() {
@@ -223,37 +284,64 @@ export class RidesService {
     if (!ride) {
       throw new NotFoundException('المشوار غير موجود', ErrorCodes.RideNotFound);
     }
+    if (ride.status === RideRequestStatus.Cancelled) {
+      const kinds = await this.requestedVehicleKinds([ride.id]);
+      return this.mapRide(ride, kinds.get(ride.id) ?? null);
+    }
     if (
       ride.status === RideRequestStatus.Completed ||
-      ride.status === RideRequestStatus.Cancelled
+      ride.status === RideRequestStatus.InProgress
     ) {
+      throw new AppException(
+        ride.status === RideRequestStatus.InProgress
+          ? 'لا يمكن إلغاء مشوار قيد التنفيذ'
+          : 'لا يمكن إلغاء هذا المشوار',
+        400,
+        ErrorCodes.RideNotCancellable,
+      );
+    }
+    const cancelled = await this.prisma.rideRequest.updateMany({
+      where: {
+        id: ride.id,
+        riderUserId: userId,
+        isDeleted: false,
+        status: ride.status,
+      },
+      data: {
+        status: RideRequestStatus.Cancelled,
+        cancelledAt: utcNow(),
+        updatedAt: utcNow(),
+      },
+    });
+    const updated = await this.prisma.rideRequest.findFirst({
+      where: { id: ride.id, isDeleted: false },
+      include: rideInclude,
+    });
+    if (!updated) {
+      throw new NotFoundException('المشوار غير موجود', ErrorCodes.RideNotFound);
+    }
+    if (cancelled.count !== 1) {
+      if (updated.status === RideRequestStatus.Cancelled) {
+        const kinds = await this.requestedVehicleKinds([updated.id]);
+        return this.mapRide(updated, kinds.get(updated.id) ?? null);
+      }
       throw new AppException(
         'لا يمكن إلغاء هذا المشوار',
         400,
         ErrorCodes.RideNotCancellable,
       );
     }
-    if (ride.status === RideRequestStatus.InProgress) {
-      throw new AppException(
-        'لا يمكن إلغاء مشوار قيد التنفيذ',
-        400,
-        ErrorCodes.RideNotCancellable,
-      );
-    }
-    const updated = await this.prisma.rideRequest.update({
-      where: { id: ride.id },
-      data: {
-        status: RideRequestStatus.Cancelled,
-        cancelledAt: utcNow(),
-        updatedAt: utcNow(),
-      },
-      include: rideInclude,
-    });
     publishRiderHistoryChange({
       userId: updated.riderUserId,
       product: 'ride',
       id: updated.id,
     });
+    const assignedUserId = updated.driver?.userId;
+    this.driverGateway?.broadcastRideWithdrawn(
+      updated.id,
+      assignedUserId ? [assignedUserId] : [],
+    );
+    this.rideTrackingGateway?.publishRideCancelled(updated.id, 'rider');
     const kinds = await this.requestedVehicleKinds([updated.id]);
     return this.mapRide(updated, kinds.get(updated.id) ?? null);
   }
@@ -312,6 +400,96 @@ export class RidesService {
     };
   }
 
+  async handleEarlyTermination(
+    rideId: string,
+    action: 'request' | 'accept' | 'reject',
+    reason?: string,
+    latitude?: number,
+    longitude?: number,
+  ) {
+    const userId = this.currentUser.requireUserId();
+    const ride = await this.prisma.rideRequest.findFirst({
+      where: { id: rideId, riderUserId: userId, isDeleted: false },
+    });
+    if (!ride) throw new NotFoundException('المشوار غير موجود');
+    if (ride.status !== RideRequestStatus.InProgress) {
+      throw new AppException('لا يمكن طلب إنهاء مبكر إلا لمشوار قيد التنفيذ', 400);
+    }
+    if (action === 'request') {
+      this.rideTrackingGateway?.publishTerminationRequested(
+        rideId,
+        'rider',
+        reason || 'ظرف طارئ من الراكب',
+        latitude,
+        longitude,
+      );
+      return { rideId, requested: true, message: 'تم إرسال طلب الإنهاء المبكر' };
+    }
+    if (action === 'accept') {
+      const updated = await this.prisma.rideRequest.update({
+        where: { id: ride.id },
+        data: {
+          status: RideRequestStatus.Completed,
+          completedAt: utcNow(),
+          updatedAt: utcNow(),
+        },
+      });
+      this.rideTrackingGateway?.publishTerminationResolved(rideId, true);
+      this.rideTrackingGateway?.publishRideCompleted(
+        updated.id,
+        updated.completedAt,
+        Number(updated.fareAmount),
+        updated.distanceKm ? Number(updated.distanceKm) : undefined,
+      );
+      return { rideId, resolved: true, completed: true, message: 'تم قبول الإنهاء المبكر واكتمال المشوار' };
+    }
+    this.rideTrackingGateway?.publishTerminationResolved(rideId, false);
+    return { rideId, resolved: true, completed: false, message: 'تم رفض طلب الإنهاء المبكر' };
+  }
+
+  /**
+   * Instant rides are billed on the driving route the rider sees.
+   * Straight-line distance underprices a road that bends.
+   */
+  private async tripDistanceKm(
+    pickupLatitude?: number,
+    pickupLongitude?: number,
+    destinationLatitude?: number,
+    destinationLongitude?: number,
+  ): Promise<number | null> {
+    const straightKm = this.fare.distanceKm(
+      pickupLatitude,
+      pickupLongitude,
+      destinationLatitude,
+      destinationLongitude,
+    );
+    if (
+      straightKm == null ||
+      pickupLatitude == null ||
+      pickupLongitude == null ||
+      destinationLatitude == null ||
+      destinationLongitude == null ||
+      this.places == null
+    ) {
+      return straightKm;
+    }
+    try {
+      const route = await this.places.drivingRoute({
+        originLat: pickupLatitude,
+        originLng: pickupLongitude,
+        destLat: destinationLatitude,
+        destLng: destinationLongitude,
+      });
+      const roadKm = route.distanceMeters / 1000;
+      if (Number.isFinite(roadKm) && roadKm > 0) {
+        return roadKm;
+      }
+    } catch {
+      // Routing can be down. Keep the straight-line distance so quoting still works.
+    }
+    return straightKm;
+  }
+
   private async requestedVehicleKinds(ids: string[]) {
     const unique = [...new Set(ids.filter((id) => id.trim().length > 0))];
     const kinds = new Map<string, string | null>();
@@ -350,4 +528,5 @@ function parseScheduledFor(value?: string | null): Date | null {
   if (!raw) return null;
   const date = new Date(raw);
   return Number.isNaN(date.getTime()) ? null : date;
+
 }

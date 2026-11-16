@@ -360,11 +360,15 @@ function dayMatch(
 
 function tripBucketSql(bucket: BucketName): Prisma.Sql {
   const open = Prisma.sql`b."Status" NOT IN (3, 4) AND h."Status" NOT IN (4, 5)`;
+  const sameDay = Prisma.sql`(h."DepartureAt" AT TIME ZONE 'Africa/Cairo')::date
+        = (now() AT TIME ZONE 'Africa/Cairo')::date`;
   if (bucket === 'current') {
     return Prisma.sql`${open}
-      AND h."Status" = 3
-      AND (h."DepartureAt" AT TIME ZONE 'Africa/Cairo')::date
-        = (now() AT TIME ZONE 'Africa/Cairo')::date`;
+      AND ${sameDay}
+      AND (
+        h."Status" = 3
+        OR h."DepartureAt" <= now()
+      )`;
   }
   if (bucket === 'upcoming') {
     return Prisma.sql`${open}
@@ -381,7 +385,7 @@ function tripBucketSql(bucket: BucketName): Prisma.Sql {
     OR (
       h."DepartureAt" <= now()
       AND NOT (
-        h."Status" = 3
+        ${open}
         AND (h."DepartureAt" AT TIME ZONE 'Africa/Cairo')::date
           = (now() AT TIME ZONE 'Africa/Cairo')::date
       )

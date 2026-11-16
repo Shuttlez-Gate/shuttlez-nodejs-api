@@ -7,6 +7,8 @@ import { AuthService } from './auth.service';
 import { JwtTokenService } from './jwt-token.service';
 import { OtpService } from './otp.service';
 import { FirebaseTokenVerifier } from '../../integrations/firebase/firebase-token.verifier';
+import { AuthRateLimiter } from './auth-rate-limiter';
+import { PhoneAccountService } from './phone-account.service';
 
 @Module({
   imports: [
@@ -28,6 +30,8 @@ import { FirebaseTokenVerifier } from '../../integrations/firebase/firebase-toke
     OtpService,
     JwtTokenService,
     FirebaseTokenVerifier,
+    AuthRateLimiter,
+    PhoneAccountService,
   ],
   exports: [AuthService, JwtTokenService, OtpService],
 })

@@ -1,9 +1,10 @@
-import { Body, Controller, Delete, Get, Patch, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { ApiResponse } from '../../common/api-response';
 import { AuthService } from './auth.service';
 import {
+  ChangePhoneRequest,
   RefreshTokenRequest,
   RegisterRequest,
   SendOtpRequest,
@@ -76,6 +77,23 @@ export class AuthController {
     await this.auth.logout(request.refreshToken);
     return ApiResponse.ok(undefined, 'تم تسجيل الخروج');
   }
+
+  @Post('logout-all')
+  async logoutAll() {
+    await this.auth.revokeAllSessions();
+    return ApiResponse.ok(undefined, 'تم تسجيل الخروج من كل الأجهزة');
+  }
+
+  @Get('sessions')
+  async sessions() {
+    return ApiResponse.ok(await this.auth.listSessions());
+  }
+
+  @Post('sessions/:id/revoke')
+  async revokeSession(@Param('id') id: string) {
+    await this.auth.revokeSession(id);
+    return ApiResponse.ok(undefined, 'تم إنهاء الجلسة');
+  }
 }
 
 @ApiTags('users')
@@ -88,6 +106,12 @@ export class UsersController {
   async getMe() {
     const profile = await this.auth.getMe();
     return ApiResponse.ok(profile);
+  }
+
+  @Patch('me/phone')
+  async changePhone(@Body() request: ChangePhoneRequest, @Req() req: Request) {
+    const result = await this.auth.changePhone(request, clientIp(req));
+    return ApiResponse.ok(result, 'تم تحديث رقم الهاتف');
   }
 
   @Patch('me')

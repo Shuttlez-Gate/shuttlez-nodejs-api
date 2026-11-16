@@ -108,6 +108,24 @@ export function addOperationalDays(start: Date, days: number, timeZone: string):
   return startOfOperationalDay(new Date(noonUtc), timeZone);
 }
 
+export function addOperationalMonths(start: Date, months: number, timeZone: string): Date {
+  const parts = getZonedParts(start, timeZone);
+  const monthIndex = parts.month - 1 + months;
+  const year = parts.year + Math.floor(monthIndex / 12);
+  const month = ((monthIndex % 12) + 12) % 12;
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  const day = Math.min(parts.day, lastDay);
+  return zonedWallTimeToUtc(
+    year,
+    month + 1,
+    day,
+    parts.hour,
+    parts.minute,
+    parts.second,
+    timeZone,
+  );
+}
+
 export function inHalfOpenRange(value: Date, start: Date, end: Date): boolean {
   const time = value.getTime();
   return time >= start.getTime() && time < end.getTime();

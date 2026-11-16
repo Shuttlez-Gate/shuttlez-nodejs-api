@@ -38,6 +38,8 @@ export function riderHistoryBucket(input: {
   const sameDay = cairoDateKey(input.scheduledAt) === cairoDateKey(now);
   if (input.tripStatus === TripStatus.InProgress && sameDay) return 'current';
   if (input.scheduledAt.getTime() > now.getTime()) return 'upcoming';
+  // معاد النهاردة عدّى والرحلة لسه مش مكتملة ولا ملغية: تفضل حالية عند الراكب.
+  if (sameDay) return 'current';
   return 'past';
 }
 

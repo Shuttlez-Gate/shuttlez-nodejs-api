@@ -7,13 +7,18 @@ import {
   NotFoundException,
 } from '../../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../../common/error-codes';
-import { TripStatus, VehicleType } from '../../../common/enums';
+import { TripStatus, VehicleType, RouteOwnerType } from '../../../common/enums';
 import { newId, utcNow } from '../../../common/utils/date.util';
 import { baseFields } from '../../../common/utils/entity-defaults';
 import { money, normalizeMoney, refCode } from '../../../common/utils/money';
 import { tripStatusLabel, vehicleTypeLabel } from '../../../common/utils/enums-map';
 import { pageRequestFrom, PagedResult } from '../../../common/paged-result';
 import { assertCaptainEligible } from '../captain-eligibility';
+import {
+  CAPTAIN_TRIP_LOCK_CLASS,
+  departureSlotFor,
+  isDepartureSlotConflict,
+} from '../../marketplace/departure-slot';
 import { isConfirmedDemandPassenger } from './demand-confirmation';
 import {
   buildDisplayLabel,
@@ -487,20 +492,57 @@ export class RouteDemandService {
       );
     }
 
+    const captainRoute = route.ownerType === RouteOwnerType.Captain;
+    const departureSlot = captainRoute ? departureSlotFor(scheduledAt) : null;
     const commission = Number(readiness.commissionRate ?? 0);
-    const trip = await this.prisma.trip.create({
-      data: {
-        id: newId(),
-        routeId,
-        driverId,
-        status: driverId ? TripStatus.DriverAssigned : TripStatus.Scheduled,
-        scheduledAt,
-        pricePerSeat: normalizeMoney(money(rule.oneWayPrice)),
-        availableSeats: resolved.capacity,
-        referenceCode: refCode('LN'),
-        ...baseFields(),
-      },
-    });
+    let trip;
+    try {
+      trip = await this.prisma.$transaction(async (tx) => {
+        if (captainRoute && departureSlot) {
+          await tx.$executeRaw`
+            SELECT pg_advisory_xact_lock(CAST(${CAPTAIN_TRIP_LOCK_CLASS} AS integer), hashtext(${route.id}))`;
+          const existing = await tx.trip.findMany({
+            where: {
+              routeId,
+              isDeleted: false,
+              status: { not: TripStatus.Cancelled },
+            },
+            select: { scheduledAt: true, departureSlot: true },
+          });
+          const taken = existing.some(
+            (row) => (row.departureSlot || departureSlotFor(row.scheduledAt)) === departureSlot,
+          );
+          if (taken) {
+            throw new AppException(
+              'توجد رحلة تشغيلية لنفس الخط والموعد بالفعل.',
+              400,
+              ErrorCodes.DuplicateOperationalTrip,
+            );
+          }
+        }
+        return tx.trip.create({
+          data: {
+            id: newId(),
+            routeId,
+            driverId,
+            status: driverId ? TripStatus.DriverAssigned : TripStatus.Scheduled,
+            scheduledAt,
+            pricePerSeat: normalizeMoney(money(rule.oneWayPrice)),
+            availableSeats: resolved.capacity,
+            referenceCode: refCode('LN'),
+            departureSlot,
+            ...baseFields(),
+          },
+        });
+      });
+    } catch (error) {
+      if (!isDepartureSlotConflict(error)) throw error;
+      throw new AppException(
+        'توجد رحلة تشغيلية لنفس الخط والموعد بالفعل.',
+        400,
+        ErrorCodes.DuplicateOperationalTrip,
+      );
+    }
 
     return {
       tripId: trip.id,
@@ -1071,7 +1113,7 @@ export class RouteDemandService {
       reasonCode = ReasonCodes.DemandExceedsCapacity;
       reason = `الطلب (${demand}) يتجاوز السعة (${capacity}). ${reason}`;
     }
-    let planningStatus = toPlanningStatus(enumStatus, reasonCode, demand, capacity);
+    const planningStatus = toPlanningStatus(enumStatus, reasonCode, demand, capacity);
     let expectedSeats: number | null = null;
     let gross: number | null = null;
     let platform: number | null = null;

@@ -17,12 +17,14 @@ import {
 } from '../../common/enums';
 import { baseFields } from '../../common/utils/entity-defaults';
 import { newId, utcNow } from '../../common/utils/date.util';
-import { money } from '../../common/utils/money';
+import { money, platformCut } from '../../common/utils/money';
+import { cairoDateKey } from '../bookings/rider-history-bucket';
 import {
   driverDocumentMediaUrl,
   toDataUrlStoragePath,
 } from '../../common/utils/document-storage';
 import {
+  captainVehicleKind,
   documentTypeLabel,
   groupStatusLabel,
   parseDocumentType,
@@ -31,9 +33,22 @@ import {
   vehicleTypeLabel,
   verificationLabel,
 } from '../../common/utils/enums-map';
+import {
+  decideRideAccept,
+  estimateRideRemainingMinutes,
+  evaluateOfferEligibility,
+  NEAR_COMPLETION_MINUTES,
+  offerVehicleCompatible,
+  resolveOfferRadiusKm,
+  workloadBlockReason,
+} from './ride-offer-policy';
 import { RidesService } from '../rides/rides.service';
 import { FareService } from '../pricing/fare.service';
-import { DriverGateway } from '../realtime/realtime.gateway';
+import {
+  DriverGateway,
+  RideTrackingGateway,
+  TripTrackingGateway,
+} from '../realtime/realtime.gateway';
 import { GroupsService } from '../groups/groups.service';
 import {
   publishRiderHistoryChange,
@@ -49,6 +64,8 @@ export class DriversService {
     private readonly groups: GroupsService,
     private readonly fare?: FareService,
     private readonly driverGateway?: DriverGateway,
+    private readonly rideTrackingGateway?: RideTrackingGateway,
+    private readonly tripTracking?: TripTrackingGateway,
   ) {}
 
   async me() {
@@ -128,26 +145,47 @@ export class DriversService {
   async myTrips() {
     const driver = await this.requireDriver();
     const now = utcNow();
+
+    const plateNumber = driver.plateNumber ?? driver.vehicle?.plateNumber ?? null;
+    const vehicleColor = driver.vehicleColor ?? null;
+
+    // 1. جلب رحلات الشاتل المجدولة (Trips)
     const rows = await this.prisma.trip.findMany({
       where: { driverId: driver.id, isDeleted: false },
       include: {
         route: { include: { stops: { where: { isDeleted: false } } } },
-        bookings: { where: { isDeleted: false } },
+        bookings: {
+          where: { isDeleted: false },
+          include: { user: { select: { fullName: true } } },
+        },
       },
       orderBy: { scheduledAt: 'asc' },
     });
-    const projected = rows.map((t) => {
+    const projectedTrips = rows.map((t) => {
       const confirmed = t.bookings.filter((b) => b.status === BookingStatus.Confirmed);
       const ui = resolveUiStatus(t.status, t.scheduledAt, now);
       const lastStop = [...t.route.stops].sort((a, b) => b.order - a.order)[0];
+      const isCaptainRoute = t.route.ownerDriverId === driver.id;
+      const collectedTotal = confirmed.reduce((sum, booking) => {
+        const row =
+          money(booking.totalAmount) > 0
+            ? money(booking.totalAmount)
+            : money(booking.pricePerSeat) * booking.seatCount;
+        return sum + row;
+      }, 0);
+      const fareCollected = t.status === TripStatus.Completed && collectedTotal > 0;
+      const cut = platformCut(fareCollected ? collectedTotal : 0);
       return {
         id: t.id,
+        referenceCode: t.referenceCode,
         dateLabel: t.scheduledAt.toLocaleDateString('en-GB'),
         timeLabel: t.scheduledAt.toLocaleTimeString('en-US', {
           hour: '2-digit',
           minute: '2-digit',
         }),
-        vehicleType: vehicleTypeLabel(driver.vehicle?.type ?? 1),
+        vehicleType: isCaptainRoute
+          ? 'CaptainRoute'
+          : vehicleTypeLabel(driver.vehicle?.type ?? 1),
         from: t.route.name,
         to: lastStop?.name ?? t.route.description ?? 'الوصول',
         passengers: confirmed.reduce((s, b) => s + b.seatCount, 0),
@@ -162,13 +200,253 @@ export class DriversService {
         tripStatus: tripStatusLabel(t.status),
         pricePerSeat: money(t.pricePerSeat),
         availableSeats: t.availableSeats,
+        kind: isCaptainRoute ? 'route' : 'shuttle',
+        plateNumber: plateNumber,
+        vehicleColor: vehicleColor,
+        durationMinutes: t.route.durationSeconds
+          ? Math.max(1, Math.round(t.route.durationSeconds / 60))
+          : null,
+        startedAt: t.startedAt,
+        completedAt: t.completedAt,
+        encodedPolyline: t.route.encodedPolyline,
+        totalAmount: cut.total,
+        appCommission: cut.appCommission,
+        fareCollected,
+        riders: confirmed.map((b) => ({
+          id: b.id,
+          userId: b.userId,
+          name: b.user?.fullName?.trim() || 'راكب',
+          seats: b.seatCount,
+          fare:
+            money(b.totalAmount) > 0
+              ? money(b.totalAmount)
+              : money(b.pricePerSeat) * b.seatCount,
+          originStopId: b.originStopId,
+          destinationStopId: b.destinationStopId,
+        })),
+        stopsList: [...t.route.stops]
+          .sort((a, b) => a.order - b.order)
+          .map((s) => ({
+            id: s.id,
+            name: s.name,
+            order: s.order,
+            latitude: s.latitude,
+            longitude: s.longitude,
+            boarding: confirmed
+              .filter((b) => b.originStopId === s.id)
+              .reduce((sum, b) => sum + b.seatCount, 0),
+            alighting: confirmed
+              .filter((b) => b.destinationStopId === s.id)
+              .reduce((sum, b) => sum + b.seatCount, 0),
+          })),
       };
     });
+
+    // 2. جلب المشاوير اللحظية الخاصة بالكابتن (RideRequests)
+    const rideRows = await this.prisma.rideRequest.findMany({
+      where: { driverId: driver.id, isDeleted: false },
+      include: { rider: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    const projectedRides = rideRows.map((r) => {
+      const rideDate = r.scheduledFor ?? r.startedAt ?? r.assignedAt ?? r.createdAt;
+      const live =
+        r.status === RideRequestStatus.InProgress ||
+        r.status === RideRequestStatus.Assigned;
+      const uiStatus = resolveOpenUiStatus({
+        cancelled: r.status === RideRequestStatus.Cancelled,
+        completed: r.status === RideRequestStatus.Completed,
+        live,
+        appointment: rideDate,
+        now,
+      });
+      const tripStatus =
+        uiStatus === 'cancelled'
+          ? 'Cancelled'
+          : uiStatus === 'finished'
+            ? 'Completed'
+            : live
+              ? 'InProgress'
+              : 'Scheduled';
+
+      const earnings =
+        money(r.captainEarnings) > 0
+          ? money(r.captainEarnings)
+          : money(r.fareAmount || r.totalAmount);
+      const rideTotal = money(r.totalAmount) || money(r.fareAmount);
+      const fareCollected = r.status === RideRequestStatus.Completed && rideTotal > 0;
+      const cut = platformCut(fareCollected ? rideTotal : 0);
+
+      return {
+        id: r.id,
+        referenceCode: r.referenceCode,
+        dateLabel: rideDate.toLocaleDateString('en-GB'),
+        timeLabel: rideDate.toLocaleTimeString('en-US', {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+        vehicleType: r.requestedVehicleKind || vehicleTypeLabel(driver.vehicle?.type ?? 1),
+        from: r.pickupAddress || 'نقطة الانطلاق',
+        to: r.destinationAddress || 'الوجهة المحددة',
+        passengers: 1,
+        stations: 2,
+        earnings,
+        status: uiStatus,
+        scheduledAt: rideDate,
+        routeId: null,
+        tripStatus,
+        pricePerSeat: money(r.fareAmount || r.totalAmount),
+        availableSeats: 0,
+        kind: 'ride',
+        plateNumber,
+        vehicleColor,
+        passengerName: r.rider?.fullName ?? null,
+        totalAmount: cut.total,
+        appCommission: cut.appCommission,
+        fareCollected,
+        distanceKm: r.distanceKm != null ? money(r.distanceKm) : null,
+        durationMinutes:
+          r.startedAt && r.completedAt
+            ? Math.max(1, Math.round((r.completedAt.getTime() - r.startedAt.getTime()) / 60000))
+            : null,
+        startedAt: r.startedAt,
+        completedAt: r.completedAt,
+        stopsList: [
+          {
+            id: `${r.id}-pickup`,
+            name: r.pickupAddress || 'نقطة الانطلاق',
+            order: 0,
+            latitude: r.pickupLatitude,
+            longitude: r.pickupLongitude,
+            boarding: 1,
+            alighting: 0,
+          },
+          {
+            id: `${r.id}-dropoff`,
+            name: r.destinationAddress || 'الوجهة المحددة',
+            order: 1,
+            latitude: r.destinationLatitude,
+            longitude: r.destinationLongitude,
+            boarding: 0,
+            alighting: 1,
+          },
+        ],
+      };
+    });
+
+    // 3. جلب رحلات المجموعات الخاصة بالكابتن (GroupRequests)
+    const groupRows = await this.prisma.groupRequest.findMany({
+      where: { driverId: driver.id, isDeleted: false },
+      include: { members: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    const projectedGroups = groupRows.map((g) => {
+      const gDate = g.confirmedAt ?? g.startedAt ?? g.createdAt;
+      const live =
+        g.status === GroupRequestStatus.InProgress ||
+        g.status === GroupRequestStatus.Assigned;
+      const uiStatus = resolveOpenUiStatus({
+        cancelled: g.status === GroupRequestStatus.Cancelled,
+        completed: g.status === GroupRequestStatus.Completed,
+        live,
+        appointment: gDate,
+        now,
+      });
+      const tripStatus =
+        uiStatus === 'cancelled'
+          ? 'Cancelled'
+          : uiStatus === 'finished'
+            ? 'Completed'
+            : live
+              ? 'InProgress'
+              : 'Scheduled';
+
+      const earnings =
+        money(g.captainEarnings) > 0
+          ? money(g.captainEarnings)
+          : money(g.fareAmount || g.totalAmount);
+      const groupTotal = money(g.totalAmount) || money(g.fareAmount);
+      const fareCollected = g.status === GroupRequestStatus.Completed && groupTotal > 0;
+      const cut = platformCut(fareCollected ? groupTotal : 0);
+
+      return {
+        id: g.id,
+        referenceCode: g.referenceCode,
+        dateLabel: gDate.toLocaleDateString('en-GB'),
+        timeLabel: gDate.toLocaleTimeString('en-US', {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+        vehicleType: vehicleTypeLabel(driver.vehicle?.type ?? 1),
+        from: g.pickupAddress || 'نقطة التجمع',
+        to: g.destinationAddress || 'الوجهة المحددة',
+        passengers: g.members?.length || 1,
+        stations: 2,
+        earnings,
+        status: uiStatus,
+        scheduledAt: gDate,
+        routeId: null,
+        tripStatus,
+        pricePerSeat: money(g.fareAmount || g.totalAmount),
+        availableSeats: 0,
+        kind: 'group',
+        plateNumber,
+        vehicleColor,
+        durationMinutes:
+          g.startedAt && g.completedAt
+            ? Math.max(1, Math.round((g.completedAt.getTime() - g.startedAt.getTime()) / 60000))
+            : null,
+        startedAt: g.startedAt,
+        completedAt: g.completedAt,
+        totalAmount: cut.total,
+        appCommission: cut.appCommission,
+        fareCollected,
+        stopsList: [
+          {
+            id: `${g.id}-pickup`,
+            name: g.pickupAddress || 'نقطة التجمع',
+            order: 0,
+            latitude: g.pickupLatitude,
+            longitude: g.pickupLongitude,
+            boarding: g.members?.length || 1,
+            alighting: 0,
+          },
+          {
+            id: `${g.id}-dropoff`,
+            name: g.destinationAddress || 'الوجهة المحددة',
+            order: 1,
+            latitude: g.destinationLatitude,
+            longitude: g.destinationLongitude,
+            boarding: 0,
+            alighting: g.members?.length || 1,
+          },
+        ],
+      };
+    });
+
+    const allProjected = [...projectedTrips, ...projectedRides, ...projectedGroups];
+
+    const current =
+      allProjected.find((t) => t.status === 'active' || t.status === 'overdue') ?? null;
+    const upcoming = allProjected
+      .filter((t) => t.status === 'upcoming')
+      .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime());
+    const finished = allProjected
+      .filter((t) => t.status === 'finished')
+      .sort((a, b) => new Date(b.scheduledAt).getTime() - new Date(a.scheduledAt).getTime());
+    const cancelled = allProjected
+      .filter((t) => t.status === 'cancelled')
+      .sort((a, b) => new Date(b.scheduledAt).getTime() - new Date(a.scheduledAt).getTime());
+
     return {
-      current:
-        projected.find((t) => t.status === 'active' || t.status === 'overdue') ?? null,
-      upcoming: projected.filter((t) => t.status === 'upcoming'),
-      finished: projected.filter((t) => t.status === 'finished').reverse(),
+      current,
+      upcoming,
+      finished,
+      cancelled,
+      currentTrip: current,
+      upcomingTrips: upcoming,
+      historyTrips: [...finished, ...cancelled],
+      cancelledTrips: cancelled,
     };
   }
 
@@ -178,6 +456,61 @@ export class DriversService {
 
   async completeTrip(tripId: string) {
     return this.transitionTrip(tripId, false);
+  }
+
+  async cancelTrip(tripId: string, reason?: string) {
+    const driver = await this.requireDriver();
+    const trip = await this.prisma.trip.findFirst({
+      where: { id: tripId, driverId: driver.id, isDeleted: false },
+      include: {
+        bookings: {
+          where: {
+            isDeleted: false,
+            status: { in: [BookingStatus.Pending, BookingStatus.Confirmed] },
+          },
+        },
+      },
+    });
+
+    if (trip) {
+      if (trip.status === TripStatus.Cancelled) {
+        return { tripId: trip.id, status: 'Cancelled', message: 'الرحلة ملغية بالفعل' };
+      }
+      if (trip.status === TripStatus.Completed) {
+        throw new AppException('لا يمكن إلغاء رحلة مكتملة', 400);
+      }
+      await this.prisma.trip.update({
+        where: { id: trip.id },
+        data: { status: TripStatus.Cancelled, updatedAt: utcNow() },
+      });
+      if (trip.bookings.length > 0) {
+        await this.prisma.booking.updateMany({
+          where: { tripId: trip.id, isDeleted: false },
+          data: { status: BookingStatus.Cancelled, updatedAt: utcNow() },
+        });
+      }
+      return { tripId: trip.id, status: 'Cancelled', message: 'تم إلغاء الرحلة بنجاح' };
+    }
+
+    const ride = await this.prisma.rideRequest.findFirst({
+      where: { id: tripId, driverId: driver.id, isDeleted: false },
+    });
+    if (ride) {
+      return this.cancelRideByDriver(tripId, reason);
+    }
+
+    const group = await this.prisma.groupRequest.findFirst({
+      where: { id: tripId, driverId: driver.id, isDeleted: false },
+    });
+    if (group) {
+      await this.prisma.groupRequest.update({
+        where: { id: group.id },
+        data: { status: GroupRequestStatus.Cancelled, updatedAt: utcNow() },
+      });
+      return { tripId: group.id, status: 'Cancelled', message: 'تم إلغاء رحلة المجموعة بنجاح' };
+    }
+
+    throw new NotFoundException('الرحلة غير موجودة', ErrorCodes.TripNotFound);
   }
 
   async publicProfile(driverId: string) {
@@ -347,8 +680,27 @@ export class DriversService {
     return items.map((r) => this.rides.mapRide(r));
   }
 
-  async pendingNearbyRides(latitude?: number, longitude?: number, radiusKm: number = 25) {
+  async pendingNearbyRides(latitude?: number, longitude?: number, radiusKm: number = 5) {
     const driver = await this.requireDriver();
+    const workload = await this.loadOfferWorkload(driver, latitude, longitude);
+    if (workload.block) return [];
+
+    let evalLat = latitude;
+    let evalLng = longitude;
+    if (
+      workload.activeRide?.status === RideRequestStatus.InProgress &&
+      workload.remainingMinutes != null &&
+      workload.remainingMinutes <= NEAR_COMPLETION_MINUTES &&
+      workload.activeRide.destinationLatitude != null &&
+      workload.activeRide.destinationLongitude != null
+    ) {
+      evalLat = workload.activeRide.destinationLatitude;
+      evalLng = workload.activeRide.destinationLongitude;
+    }
+    if (evalLat == null || evalLng == null) return [];
+
+    const maxRadiusKm = resolveOfferRadiusKm(radiusKm);
+
     const cutoff = new Date(Date.now() - 15 * 60 * 1000);
     const items = await this.prisma.rideRequest.findMany({
       where: {
@@ -361,28 +713,41 @@ export class DriversService {
         rider: true,
       },
       orderBy: { createdAt: 'desc' },
-      take: 10,
+      take: 20,
     });
 
+    const captainKind = captainVehicleKind(driver);
     const results = [];
     for (const item of items) {
-      let distanceToPickupKm = 2.0;
-      if (latitude != null && longitude != null && item.pickupLatitude != null && item.pickupLongitude != null && this.fare) {
-        const d = this.fare.distanceKm(latitude, longitude, item.pickupLatitude, item.pickupLongitude);
-        if (d != null) {
-          distanceToPickupKm = d;
-          if (radiusKm > 0 && distanceToPickupKm > radiusKm) {
-            continue;
-          }
-        }
-      }
+      const requestedKind = item.requestedVehicleKind ?? null;
+      const decision = evaluateOfferEligibility({
+        isActive: true,
+        isOnline: true,
+        hasActiveShuttle: false,
+        hasActiveGroup: false,
+        captainLatitude: evalLat,
+        captainLongitude: evalLng,
+        pickupLatitude: item.pickupLatitude,
+        pickupLongitude: item.pickupLongitude,
+        radiusKm: maxRadiusKm,
+        requestedVehicleKind: requestedKind,
+        captainVehicleKind: captainKind,
+      });
+      if (!decision.visible || decision.distanceKm == null) continue;
+
+      const distanceToPickupKm = decision.distanceKm;
       const tripDist = item.distanceKm ? Number(item.distanceKm) : 3.0;
+      this.driverGateway?.rememberOffer(item.id, driver.userId);
       results.push({
         id: item.id,
-        vehicleKind: 'car',
+        vehicleKind: requestedKind || 'car',
         passengerName: item.rider?.fullName || 'راكب شاتلز',
         passengerPhone: item.rider?.phone || null,
-        passengerRating: 4.9,
+        passengerRating:
+          item.rider?.ratingAverage != null ? Number(item.rider.ratingAverage) : 4.9,
+        passengerRatingCount: item.rider?.ratingCount ?? 0,
+        passengerAvatarUrl: item.rider?.avatarUrl ?? null,
+        referenceCode: item.referenceCode,
         pickupAddress: item.pickupAddress || 'نقطة الانطلاق',
         dropoffAddress: item.destinationAddress || 'الوجهة المحددة',
         pickupLatitude: item.pickupLatitude,
@@ -390,57 +755,106 @@ export class DriversService {
         destinationLatitude: item.destinationLatitude,
         destinationLongitude: item.destinationLongitude,
         fare: money(item.fareAmount),
+        earnings: money(item.captainEarnings),
         distanceKm: money(distanceToPickupKm),
         tripDistanceKm: money(tripDist),
         etaMinutes: Math.max(3, Math.round(distanceToPickupKm * 2.5)),
+        durationMinutes: Math.max(1, Math.round((tripDist / 30) * 60)),
         paymentMethod: item.paymentMethod || 'cash',
         timeoutSeconds: 30,
         createdAt: item.createdAt,
       });
     }
-    return results;
+
+    // الشرط 4: ترتيب الرحلات الأقرب إلى الكابتن أولاً
+    results.sort((a, b) => Number(a.distanceKm) - Number(b.distanceKm));
+    return results.slice(0, 5);
+  }
+
+  async setAvailability(online: boolean) {
+    const driver = await this.requireDriver();
+    const updated = await this.prisma.driver.update({
+      where: { id: driver.id },
+      data: { isOnline: online, updatedAt: utcNow() },
+    });
+    return { driverId: driver.id, isOnline: updated.isOnline };
   }
 
   async acceptRide(rideId: string) {
     const driver = await this.requireDriver();
     const ride = await this.prisma.rideRequest.findFirst({
       where: { id: rideId, isDeleted: false },
+      include: { driver: { include: { user: true, vehicle: true } } },
     });
     if (!ride) {
       throw new NotFoundException('المشوار غير موجود', ErrorCodes.RideNotFound);
     }
-    if (ride.driverId != null && ride.driverId !== driver.id) {
-      throw new AppException('تم قبول هذا المشوار من قبل كابتن آخر', 400, ErrorCodes.RideNotAssignable);
+    const decision = decideRideAccept({
+      status: ride.status,
+      rideDriverId: ride.driverId,
+      actorDriverId: driver.id,
+    });
+    if (decision.action === 'reject') {
+      throw new AppException(decision.message, decision.statusCode, decision.code);
     }
-    if (ride.status === RideRequestStatus.Cancelled) {
-      throw new AppException('تم إلغاء هذا المشوار من قبل الراكب', 400, ErrorCodes.RideNotAssignable);
+    if (decision.action === 'idempotent') {
+      return this.acceptedRideResult(driver, ride, true);
     }
-    const updated = await this.prisma.rideRequest.update({
-      where: { id: ride.id },
+
+    await this.assertCanClaimRide(driver, ride);
+    const claimed = await this.prisma.rideRequest.updateMany({
+      where: {
+        id: ride.id,
+        isDeleted: false,
+        status: RideRequestStatus.Requested,
+        OR: [{ driverId: null }, { driverId: driver.id }],
+      },
       data: {
         driverId: driver.id,
         status: RideRequestStatus.Assigned,
         assignedAt: utcNow(),
         updatedAt: utcNow(),
       },
-      include: {
-        driver: { include: { user: true, vehicle: true } },
-      },
     });
-    this.driverGateway?.notifyClaimed(updated.id);
+    const updated = await this.prisma.rideRequest.findFirst({
+      where: { id: ride.id, isDeleted: false },
+      include: { driver: { include: { user: true, vehicle: true } } },
+    });
+    if (!updated) {
+      throw new NotFoundException('المشوار غير موجود', ErrorCodes.RideNotFound);
+    }
+    if (claimed.count !== 1) {
+      const again = decideRideAccept({
+        status: updated.status,
+        rideDriverId: updated.driverId,
+        actorDriverId: driver.id,
+      });
+      if (again.action === 'idempotent') return this.acceptedRideResult(driver, updated, true);
+      if (again.action === 'reject') {
+        throw new AppException(again.message, again.statusCode, again.code);
+      }
+      throw new AppException('تم قبول هذا المشوار من قبل كابتن آخر', 400, ErrorCodes.RideNotAssignable);
+    }
+
+    this.driverGateway?.notifyClaimed(updated.id, driver.userId);
     publishRiderHistoryChange({
       userId: updated.riderUserId,
       product: 'ride',
       id: updated.id,
     });
-    return {
-      rideId: updated.id,
-      driverId: driver.id,
-      status: rideStatusLabel(updated.status),
-      assignedAt: updated.assignedAt,
-      message: 'تم قبول المشوار بنجاح',
-      ride: this.rides.mapRide(updated),
+    const presence = this.driverGateway?.getDriverPresence(driver.userId);
+    const mappedRide = {
+      ...this.rides.mapRide(updated, updated.requestedVehicleKind),
+      ...(presence
+        ? {
+            captainLatitude: presence.latitude,
+            captainLongitude: presence.longitude,
+            captainLocationUpdatedAt: new Date(presence.updatedAt).toISOString(),
+          }
+        : {}),
     };
+    this.rideTrackingGateway?.publishRideAccepted(mappedRide);
+    return this.acceptedRideResult(driver, updated, false, mappedRide);
   }
 
   async rejectRide(rideId: string) {
@@ -485,12 +899,39 @@ export class DriversService {
       where: { id: ride.id },
       data: { updatedAt: utcNow() },
     });
+    this.rideTrackingGateway?.publishCaptainLocation(
+      ride.id,
+      {
+        rideId: ride.id,
+        latitude,
+        longitude,
+        timestamp: new Date().toISOString(),
+      },
+      ride.riderUserId,
+    );
     return {
       rideId: ride.id,
       latitude,
       longitude,
       updatedAt: utcNow(),
       status: rideStatusLabel(ride.status),
+    };
+  }
+
+  async confirmRideCash(rideId: string) {
+    const driver = await this.requireDriver();
+    const ride = await this.prisma.rideRequest.findFirst({
+      where: { id: rideId, driverId: driver.id, isDeleted: false },
+    });
+    if (!ride) {
+      throw new NotFoundException('المشوار غير موجود', ErrorCodes.RideNotFound);
+    }
+    const amount = money(ride.totalAmount) || money(ride.fareAmount);
+    this.rideTrackingGateway?.publishFareCollected(ride.id, amount, ride.riderUserId);
+    return {
+      rideId: ride.id,
+      fareAmount: amount,
+      collected: true,
     };
   }
 
@@ -521,6 +962,19 @@ export class DriversService {
       where: { id: tripId, driverId: driver.id, isDeleted: false },
     });
     if (!trip) {
+      // تفقد ما إذا كان المعرّف خاصاً بمشوار لحظي أو رحلة مجموعة
+      const ride = await this.prisma.rideRequest.findFirst({
+        where: { id: tripId, driverId: driver.id, isDeleted: false },
+      });
+      if (ride) {
+        return this.transitionRide(tripId, start);
+      }
+      const group = await this.prisma.groupRequest.findFirst({
+        where: { id: tripId, driverId: driver.id, isDeleted: false },
+      });
+      if (group) {
+        return this.transitionGroup(tripId, start);
+      }
       throw new NotFoundException('الرحلة غير موجودة', ErrorCodes.TripNotFound);
     }
     if (start) {
@@ -534,6 +988,14 @@ export class DriversService {
         where: { id: trip.id },
         data: { status: TripStatus.InProgress, startedAt: utcNow(), updatedAt: utcNow() },
       });
+      const riders = await this.prisma.booking.findMany({
+        where: { tripId: updated.id, isDeleted: false, status: { not: BookingStatus.Cancelled } },
+        select: { userId: true },
+      });
+      this.tripTracking?.publishTripStarted(
+        updated.id,
+        riders.map((booking) => booking.userId),
+      );
       await publishTripRiders(this.prisma, updated.id);
       return lifecycle('trip', updated.id, driver.id, updated.status, updated.startedAt, updated.completedAt, 'تم بدء الرحلة');
     }
@@ -579,6 +1041,12 @@ export class DriversService {
         where: { id: ride.id },
         data: { status: RideRequestStatus.InProgress, startedAt: utcNow(), updatedAt: utcNow() },
       });
+      this.rideTrackingGateway?.publishRideStarted(
+        updated.id,
+        updated.startedAt,
+        updated.riderUserId,
+      );
+      this.tripTracking?.publishTripStarted(updated.id, [updated.riderUserId]);
       publishRiderHistoryChange({
         userId: updated.riderUserId,
         product: 'ride',
@@ -607,18 +1075,30 @@ export class DriversService {
         idempotent: true,
       };
     }
-    if (ride.status !== RideRequestStatus.InProgress) {
+    if (
+      ride.status !== RideRequestStatus.InProgress &&
+      ride.status !== RideRequestStatus.Assigned
+    ) {
       throw new AppException('لا يمكن إنهاء المشوار', 400, ErrorCodes.RideNotCompletable);
     }
     const updated = await this.prisma.rideRequest.update({
       where: { id: ride.id },
       data: { status: RideRequestStatus.Completed, completedAt: utcNow(), updatedAt: utcNow() },
     });
+    this.rideTrackingGateway?.publishRideCompleted(
+      updated.id,
+      updated.completedAt,
+      money(updated.totalAmount) || money(updated.fareAmount),
+      updated.distanceKm ? Number(updated.distanceKm) : undefined,
+      updated.riderUserId,
+    );
     publishRiderHistoryChange({
       userId: updated.riderUserId,
       product: 'ride',
       id: updated.id,
     });
+    await this.rides.closeAbandonedSearches(updated.riderUserId, updated.id);
+    this.driverGateway?.releaseActiveRide(driver.userId);
     return {
       rideId: updated.id,
       driverId: driver.id,
@@ -662,6 +1142,14 @@ export class DriversService {
         where: { id: group.id },
         data: { status: GroupRequestStatus.InProgress, startedAt: utcNow(), updatedAt: utcNow() },
       });
+      const members = await this.prisma.groupMember.findMany({
+        where: { groupRequestId: updated.id, isDeleted: false },
+        select: { userId: true },
+      });
+      this.tripTracking?.publishTripStarted(
+        updated.id,
+        members.map((member) => member.userId),
+      );
       await this.groups.publishGroup(updated.id);
       return {
         groupId: updated.id,
@@ -704,6 +1192,342 @@ export class DriversService {
       message: 'تم إنهاء المجموعة',
       idempotent: false,
     };
+  }
+
+  async arriveRide(rideId: string) {
+    const driver = await this.requireDriver();
+    const ride = await this.prisma.rideRequest.findFirst({
+      where: { id: rideId, driverId: driver.id, isDeleted: false },
+    });
+    if (!ride) {
+      throw new NotFoundException('المشوار غير موجود', ErrorCodes.RideNotFound);
+    }
+    if (ride.status !== RideRequestStatus.Assigned) {
+      throw new AppException('لا يمكن تأكيد الوصول إلا بعد قبول المشوار وقبل بدئه', 400);
+    }
+    await this.prisma.rideRequest.update({
+      where: { id: ride.id },
+      data: { updatedAt: utcNow() },
+    });
+    this.rideTrackingGateway?.publishArrivalConfirmed(ride.id);
+    return {
+      rideId: ride.id,
+      arrived: true,
+      message: 'تم تأكيد الوصول لنقطة الركوب بنجاح',
+    };
+  }
+
+  async cancelRideByDriver(rideId: string, reason?: string) {
+    const driver = await this.requireDriver();
+    const ride = await this.prisma.rideRequest.findFirst({
+      where: { id: rideId, driverId: driver.id, isDeleted: false },
+    });
+    if (!ride) {
+      throw new NotFoundException('المشوار غير موجود', ErrorCodes.RideNotFound);
+    }
+    if (ride.status === RideRequestStatus.Cancelled) {
+      return { rideId: ride.id, cancelled: true, message: 'تم إلغاء المشوار بالفعل' };
+    }
+    if (ride.status === RideRequestStatus.Completed) {
+      throw new AppException('لا يمكن إلغاء مشوار مكتمل', 400);
+    }
+    if (ride.status === RideRequestStatus.InProgress) {
+      const stopped = await this.prisma.rideRequest.updateMany({
+        where: {
+          id: ride.id,
+          driverId: driver.id,
+          isDeleted: false,
+          status: RideRequestStatus.InProgress,
+        },
+        data: {
+          status: RideRequestStatus.Cancelled,
+          cancelledAt: utcNow(),
+          updatedAt: utcNow(),
+        },
+      });
+      if (stopped.count !== 1) {
+        const again = await this.prisma.rideRequest.findFirst({
+          where: { id: ride.id, isDeleted: false },
+        });
+        if (again?.status === RideRequestStatus.Cancelled) {
+          return { rideId: ride.id, cancelled: true, message: 'تم إلغاء المشوار بالفعل' };
+        }
+        throw new AppException('تعذر إلغاء المشوار', 400);
+      }
+      this.rideTrackingGateway?.publishRideCancelled(ride.id, 'driver', reason);
+      this.driverGateway?.releaseActiveRide(driver.userId);
+      publishRiderHistoryChange({
+        userId: ride.riderUserId,
+        product: 'ride',
+        id: ride.id,
+      });
+      return { rideId: ride.id, cancelled: true, message: 'تم إلغاء المشوار' };
+    }
+    const released = await this.prisma.rideRequest.updateMany({
+      where: {
+        id: ride.id,
+        driverId: driver.id,
+        isDeleted: false,
+        status: RideRequestStatus.Assigned,
+      },
+      data: {
+        driverId: null,
+        status: RideRequestStatus.Requested,
+        assignedAt: null,
+        updatedAt: utcNow(),
+      },
+    });
+    if (released.count !== 1) {
+      throw new AppException('لا يمكن إلغاء المشوار بعد بدئه، يمكن طلب إنهاء مبكر فقط', 400);
+    }
+    this.rideTrackingGateway?.publishRideCancelled(ride.id, 'driver', reason);
+    if (ride.pickupLatitude != null && ride.pickupLongitude != null) {
+      const rider = await this.prisma.user.findFirst({
+        where: { id: ride.riderUserId },
+        select: {
+          fullName: true,
+          phone: true,
+          ratingAverage: true,
+          ratingCount: true,
+          avatarUrl: true,
+        },
+      });
+      const releasedDistance = ride.distanceKm ? Number(ride.distanceKm) : 2.5;
+      this.driverGateway?.broadcastNewRide({
+        id: ride.id,
+        vehicleKind: ride.requestedVehicleKind || 'car',
+        passengerName: rider?.fullName || 'راكب شاتلز',
+        passengerPhone: rider?.phone ?? null,
+        passengerRating: rider ? Number(rider.ratingAverage) : 4.9,
+        passengerRatingCount: rider?.ratingCount ?? 0,
+        passengerAvatarUrl: rider?.avatarUrl ?? null,
+        referenceCode: ride.referenceCode,
+        pickupAddress: ride.pickupAddress || 'نقطة الانطلاق',
+        dropoffAddress: ride.destinationAddress || 'الوجهة المحددة',
+        pickupLatitude: ride.pickupLatitude,
+        pickupLongitude: ride.pickupLongitude,
+        destinationLatitude: ride.destinationLatitude,
+        destinationLongitude: ride.destinationLongitude,
+        fare: money(ride.fareAmount),
+        earnings: money(ride.captainEarnings),
+        distanceKm: ride.distanceKm ? money(ride.distanceKm) : 2.5,
+        tripDistanceKm: money(releasedDistance),
+        durationMinutes: Math.max(1, Math.round((releasedDistance / 30) * 60)),
+        etaMinutes: Math.max(3, Math.round(releasedDistance * 2.5)),
+        paymentMethod: ride.paymentMethod || 'cash',
+        createdAt: ride.createdAt,
+      });
+    }
+    return {
+      rideId: ride.id,
+      cancelled: true,
+      message: 'تم إلغاء قبول المشوار وإعادة طرحه للكباتن',
+    };
+  }
+
+  async handleEarlyTermination(
+    rideId: string,
+    action: 'request' | 'accept' | 'reject',
+    initiator: 'driver' | 'rider',
+    reason?: string,
+    latitude?: number,
+    longitude?: number,
+  ) {
+    const driver = await this.requireDriver();
+    const ride = await this.prisma.rideRequest.findFirst({
+      where: { id: rideId, isDeleted: false },
+    });
+    if (!ride) throw new NotFoundException('المشوار غير موجود');
+    if (ride.driverId !== driver.id) {
+      throw new AppException('غير مصرح', 403, ErrorCodes.RideNotAssigned);
+    }
+    if (ride.status !== RideRequestStatus.InProgress) {
+      throw new AppException('لا يمكن طلب إنهاء مبكر إلا لمشوار قيد التنفيذ', 400);
+    }
+    if (action === 'request') {
+      this.rideTrackingGateway?.publishTerminationRequested(
+        rideId,
+        initiator,
+        reason || 'ظرف طارئ',
+        latitude,
+        longitude,
+      );
+      return { rideId, requested: true, message: 'تم إرسال طلب الإنهاء المبكر' };
+    }
+    if (action === 'accept') {
+      const updated = await this.prisma.rideRequest.update({
+        where: { id: ride.id },
+        data: {
+          status: RideRequestStatus.Completed,
+          completedAt: utcNow(),
+          updatedAt: utcNow(),
+        },
+      });
+      this.rideTrackingGateway?.publishTerminationResolved(rideId, true);
+      this.rideTrackingGateway?.publishRideCompleted(
+        updated.id,
+        updated.completedAt,
+        money(updated.totalAmount) || money(updated.fareAmount),
+        updated.distanceKm ? Number(updated.distanceKm) : undefined,
+        updated.riderUserId,
+      );
+      await this.rides.closeAbandonedSearches(updated.riderUserId, updated.id);
+      return { rideId, resolved: true, completed: true, message: 'تم قبول الإنهاء المبكر واكتمال المشوار' };
+    }
+    this.rideTrackingGateway?.publishTerminationResolved(rideId, false);
+    return { rideId, resolved: true, completed: false, message: 'تم رفض طلب الإنهاء المبكر' };
+  }
+
+  private acceptedRideResult(
+    driver: { id: string },
+    ride: {
+      id: string;
+      status: number;
+      assignedAt: Date | null;
+      requestedVehicleKind?: string | null;
+      driver?: { user?: unknown; vehicle?: unknown } | null;
+    },
+    idempotent: boolean,
+    mappedRide?: object,
+  ) {
+    const rideView = mappedRide ?? this.rides.mapRide(ride as never, ride.requestedVehicleKind ?? null);
+    return {
+      rideId: ride.id,
+      driverId: driver.id,
+      status: rideStatusLabel(ride.status),
+      assignedAt: ride.assignedAt,
+      message: 'تم قبول المشوار بنجاح',
+      idempotent,
+      ride: rideView,
+    };
+  }
+
+  private async loadOfferWorkload(
+    driver: { id: string; isActive: boolean; isOnline: boolean },
+    latitude?: number,
+    longitude?: number,
+  ) {
+    const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000);
+    const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+    const [activeTrip, activeGroup, activeRide] = await Promise.all([
+      this.prisma.trip.findFirst({
+        where: {
+          driverId: driver.id,
+          status: TripStatus.InProgress,
+          isDeleted: false,
+          OR: [
+            { startedAt: { gte: twelveHoursAgo } },
+            { startedAt: null, scheduledAt: { gte: twelveHoursAgo } },
+          ],
+        },
+      }),
+      this.prisma.groupRequest.findFirst({
+        where: {
+          driverId: driver.id,
+          status: GroupRequestStatus.InProgress,
+          isDeleted: false,
+          createdAt: { gte: twelveHoursAgo },
+        },
+      }),
+      this.prisma.rideRequest.findFirst({
+        where: {
+          driverId: driver.id,
+          status: { in: [RideRequestStatus.Assigned, RideRequestStatus.InProgress] },
+          isDeleted: false,
+          createdAt: { gte: sixHoursAgo },
+        },
+        orderBy: { updatedAt: 'desc' },
+      }),
+    ]);
+    const remainingMinutes =
+      activeRide?.status === RideRequestStatus.InProgress
+        ? estimateRideRemainingMinutes({
+            captainLatitude: latitude,
+            captainLongitude: longitude,
+            destinationLatitude: activeRide.destinationLatitude,
+            destinationLongitude: activeRide.destinationLongitude,
+            startedAt: activeRide.startedAt,
+            distanceKm: activeRide.distanceKm == null ? null : Number(activeRide.distanceKm),
+            nowMs: Date.now(),
+          })
+        : null;
+    return {
+      activeTrip,
+      activeGroup,
+      activeRide,
+      remainingMinutes,
+      block: workloadBlockReason({
+        isActive: driver.isActive,
+        isOnline: driver.isOnline,
+        hasActiveShuttle: Boolean(activeTrip),
+        hasActiveGroup: Boolean(activeGroup),
+        activeRideStatus: activeRide?.status ?? null,
+        remainingMinutes,
+      }),
+    };
+  }
+
+  private async assertCanClaimRide(
+    driver: {
+      id: string;
+      userId: string;
+      isActive: boolean;
+      isOnline: boolean;
+      vehicleKind: string | null;
+      vehicle: { type: number } | null;
+    },
+    ride: {
+      pickupLatitude: number | null;
+      pickupLongitude: number | null;
+      requestedVehicleKind: string | null;
+    },
+  ) {
+    const presence = this.driverGateway?.getDriverPresence(driver.userId);
+    const workload = await this.loadOfferWorkload(
+      driver,
+      presence?.latitude,
+      presence?.longitude,
+    );
+    if (workload.block === 'offline' || workload.block === 'inactive') {
+      throw new AppException('الكابتن غير متاح لقبول المشوار', 403, ErrorCodes.DriverNotEligible);
+    }
+    if (workload.block === 'active_shuttle') {
+      throw new AppException('الكابتن لديه رحلة شاتل جارية', 409, ErrorCodes.DriverTripConflict);
+    }
+    if (workload.block === 'active_group') {
+      throw new AppException('الكابتن لديه رحلة مجموعة جارية', 409, ErrorCodes.DriverGroupConflict);
+    }
+    if (workload.block) {
+      throw new AppException('الكابتن لديه مشوار آخر جارٍ', 409, ErrorCodes.DriverRideConflict);
+    }
+    const captainKind = captainVehicleKind(driver);
+    if (!offerVehicleCompatible(ride.requestedVehicleKind, captainKind)) {
+      throw new AppException('نوع مركبة الكابتن لا يطابق المشوار', 400, ErrorCodes.DriverNotEligible);
+    }
+    if (!presence) return;
+    const decision = evaluateOfferEligibility({
+      isActive: true,
+      isOnline: true,
+      hasActiveShuttle: false,
+      hasActiveGroup: false,
+      captainLatitude: presence.latitude,
+      captainLongitude: presence.longitude,
+      pickupLatitude: ride.pickupLatitude,
+      pickupLongitude: ride.pickupLongitude,
+      requestedVehicleKind: ride.requestedVehicleKind,
+      captainVehicleKind: captainKind,
+      locationUpdatedAtMs: presence.updatedAt,
+      nowMs: Date.now(),
+      enforceLocationFreshness: true,
+    });
+    if (decision.actionable) return;
+    if (decision.reason === 'stale_location') {
+      throw new AppException('موقع الكابتن غير محدث', 400, ErrorCodes.RideLocationInvalid);
+    }
+    if (decision.reason === 'pickup_too_far') {
+      throw new AppException('نقطة الانطلاق خارج نطاق الكابتن', 400, ErrorCodes.DriverNotEligible);
+    }
+    throw new AppException('الكابتن غير مؤهل لقبول هذا المشوار', 400, ErrorCodes.DriverNotEligible);
   }
 
   private async requireDriver(mustBeActive = true) {
@@ -803,15 +1627,25 @@ function fullYearsSince(from: Date, now = new Date()): number {
 }
 
 function resolveUiStatus(status: number, scheduledAt: Date, now: Date): string {
-  if (status === TripStatus.Completed || status === TripStatus.Cancelled) {
-    return 'finished';
-  }
-  if (status === TripStatus.InProgress) {
-    return 'active';
-  }
-  if (scheduledAt < now && status !== TripStatus.Completed) {
-    return 'overdue';
-  }
+  if (status === TripStatus.Cancelled) return 'cancelled';
+  if (status === TripStatus.Completed) return 'finished';
+  if (cairoDateKey(scheduledAt) < cairoDateKey(now)) return 'finished';
+  if (status === TripStatus.InProgress) return 'active';
+  if (scheduledAt.getTime() > now.getTime()) return 'upcoming';
+  return 'overdue';
+}
+
+function resolveOpenUiStatus(input: {
+  cancelled: boolean;
+  completed: boolean;
+  live: boolean;
+  appointment: Date;
+  now: Date;
+}): 'active' | 'upcoming' | 'finished' | 'cancelled' {
+  if (input.cancelled) return 'cancelled';
+  if (input.completed) return 'finished';
+  if (cairoDateKey(input.appointment) < cairoDateKey(input.now)) return 'finished';
+  if (input.live) return 'active';
   return 'upcoming';
 }
 
@@ -835,4 +1669,5 @@ function lifecycle(
     message,
     idempotent,
   };
+
 }

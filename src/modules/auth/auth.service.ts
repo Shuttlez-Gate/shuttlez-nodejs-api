@@ -1,5 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { AuthRateLimiter } from './auth-rate-limiter';
+import { PhoneAccountService } from './phone-account.service';
+import { isAdminPasswordShape, passwordMatches } from './password.util';
+import { findStoredRefreshToken, hashRefreshToken } from './refresh-token.util';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import {
   AppException,
@@ -31,6 +35,7 @@ import {
   AuthResponseDto,
   AuthTokensDto,
   RegisterRequest,
+  ChangePhoneRequest,
   SendOtpRequest,
   SendOtpResponseDto,
   SocialCompleteRequest,
@@ -56,11 +61,14 @@ export class AuthService {
     private readonly jwt: JwtTokenService,
     private readonly currentUser: CurrentUserService,
     private readonly firebase: FirebaseTokenVerifier,
+    private readonly phoneAccounts: PhoneAccountService,
+    private readonly rateLimit: AuthRateLimiter,
   ) {}
 
   async sendOtp(request: SendOtpRequest): Promise<SendOtpResponseDto> {
     const purpose = parsePurpose(request.purpose);
     const phone = normalizePhone(request.phone);
+    this.rateLimit.hit(`send-otp:${phone}`, 5, 15 * 60_000);
 
     if (purpose === OtpPurpose.Login) {
       const user = await this.prisma.user.findFirst({
@@ -83,105 +91,158 @@ export class AuthService {
       }
     }
 
+    if (this.webChromeTest(request.platform)) {
+      const testCode = await this.otp.issueWebTestCode(phone, purpose);
+      return {
+        message: 'رمز اختبار كروم. اكتبه في الشاشة',
+        testCode,
+      };
+    }
+
     const result = await this.otp.sendOtp(phone, purpose);
-    return { message: result.message, debugCode: result.debugCode };
+    return { message: result.message };
   }
 
   async verifyOtp(request: VerifyOtpRequest, ip?: string): Promise<AuthResponseDto> {
-    const purpose = parsePurpose(request.purpose);
-    const phone = normalizePhone(request.phone);
-    const valid = await this.otp.verifyOtp(phone, request.code, purpose);
-    if (!valid) {
-      throw new UnauthorizedAppException('رمز التحقق غير صحيح أو منتهي الصلاحية');
+    const phoneKey = normalizePhone(request.phone);
+    this.rateLimit.hit(`verify-otp:${phoneKey}`, 8, 15 * 60_000);
+    if (this.webChromeTest(request.platform)) {
+      return this.verifyWebChromeTest(request, phoneKey, ip);
+    }
+    const identity = await this.requirePhoneIdentity(
+      request.firebaseIdToken,
+      request.phone,
+    );
+    const linked = await this.phoneAccounts.resolveExisting(identity);
+    if (!linked) {
+      throw new AppException(
+        'رقم جوال غير مسجل بالنظام، يمكنك تسجيل مستخدم جديد',
+      );
     }
 
     const user = await this.prisma.user.findFirst({
-      where: { phone, isDeleted: false },
+      where: { id: linked.id, isDeleted: false },
     });
     if (!user) {
       throw new AppException(
         'رقم جوال غير مسجل بالنظام، يمكنك تسجيل مستخدم جديد',
       );
     }
-
-    if (purpose === OtpPurpose.Login) {
+    if (parsePurpose(request.purpose) === OtpPurpose.Login) {
       await this.ensureCaptainCanLogin(user, request.client);
     }
-
-    const tokens = await this.issueTokens(user, ip);
+    await this.phoneAccounts.bindUidIfMissing(linked, identity.uid);
+    const tokens = await this.issueTokens(user, {
+      ip,
+      deviceId: request.deviceId,
+      platform: request.platform,
+    });
+    this.firebase.consumePhoneToken(request.firebaseIdToken!.trim(), identity.expiresAt);
     return { tokens, user: toProfileDto(user) };
   }
 
   async register(request: RegisterRequest, ip?: string): Promise<AuthResponseDto> {
-    const phone = normalizePhone(request.phone);
-    const valid = await this.otp.verifyOtp(phone, request.code, OtpPurpose.Register);
-    if (!valid) {
-      throw new UnauthorizedAppException('رمز التحقق غير صحيح أو منتهي الصلاحية');
+    this.rateLimit.hit(`register:${normalizePhone(request.phone)}`, 5, 15 * 60_000);
+    const webTest = this.webChromeTest(request.platform);
+    let phone: string;
+    let firebaseUid: string | null = null;
+    let firebaseExpiresAt = 0;
+    if (webTest) {
+      phone = normalizePhone(request.phone);
+      const code = request.code?.trim() ?? '';
+      const accepted =
+        /^\d{6}$/.test(code) &&
+        (await this.otp.verifyOtp(phone, code, OtpPurpose.Register));
+      if (!accepted) {
+        throw new UnauthorizedAppException('رمز التحقق غير صحيح');
+      }
+      const existingPhone = await this.prisma.user.findFirst({
+        where: { phone, isDeleted: false },
+        select: { id: true },
+      });
+      if (existingPhone) {
+        throw new AppException('رقم الهاتف مسجل بالفعل', 409, 'PHONE_ALREADY_REGISTERED');
+      }
+    } else {
+      const identity = await this.requirePhoneIdentity(
+        request.firebaseIdToken,
+        request.phone,
+      );
+      phone = identity.phone;
+      const existing = await this.phoneAccounts.resolveExisting(identity);
+      if (existing) {
+        throw new AppException('رقم الهاتف مسجل بالفعل');
+      }
+      firebaseUid = identity.uid;
+      firebaseExpiresAt = identity.expiresAt;
     }
 
-    const existing = await this.prisma.user.findFirst({
-      where: { phone, isDeleted: false },
-    });
-    if (existing) {
-      throw new AppException('رقم الهاتف مسجل بالفعل');
-    }
-
-    const asDriver = isDriverRegistration(
-      request.userType,
-      request.deviceId,
-      request.client,
-    );
+    const asDriver = isDriverRegistration(request.userType, request.client);
     const userId = newId();
     const now = utcNow();
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.user.create({
-        data: {
-          id: userId,
-          phone,
-          fullName: request.fullName,
-          email: request.email,
-          gender: parseGender(request.gender),
-          userType: asDriver ? UserType.Driver : UserType.Passenger,
-          ...userDefaults(now),
-        },
-      });
-      await tx.wallet.create({
-        data: { id: newId(), userId, ...walletDefaults(now) },
-      });
-      if (asDriver) {
-        await tx.driver.create({
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.user.create({
           data: {
-            id: newId(),
-            userId,
-            verificationStatus: DriverVerificationStatus.Pending,
-            nationalId: blankToNull(request.nationalId),
-            birthDate: parseDateOnly(request.birthDate),
-            licenseNumber: blankToNull(request.licenseNumber),
-            licenseType: blankToNull(request.licenseType),
-            licenseExpiry: parseDateOnly(request.licenseExpiry),
-            vehicleKind: blankToNull(request.vehicleKind),
-            vehicleModelName: blankToNull(request.vehicleModel),
-            manufactureYear: request.manufactureYear ?? null,
-            plateNumber: blankToNull(request.plateNumber),
-            vehicleColor: blankToNull(request.vehicleColor),
-            seats: request.seats ?? null,
-            ...driverDefaults(now),
-            isActive: false,
+            id: userId,
+            phone,
+            fullName: request.fullName,
+            email: request.email,
+            gender: parseGender(request.gender),
+            userType: asDriver ? UserType.Driver : UserType.Passenger,
+            firebasePhoneUid: firebaseUid,
+            ...userDefaults(now),
           },
         });
+        await tx.wallet.create({
+          data: { id: newId(), userId, ...walletDefaults(now) },
+        });
+        if (asDriver) {
+          await tx.driver.create({
+            data: {
+              id: newId(),
+              userId,
+              verificationStatus: DriverVerificationStatus.Pending,
+              nationalId: blankToNull(request.nationalId),
+              birthDate: parseDateOnly(request.birthDate),
+              licenseNumber: blankToNull(request.licenseNumber),
+              licenseType: blankToNull(request.licenseType),
+              licenseExpiry: parseDateOnly(request.licenseExpiry),
+              vehicleKind: blankToNull(request.vehicleKind),
+              vehicleModelName: blankToNull(request.vehicleModel),
+              manufactureYear: request.manufactureYear ?? null,
+              plateNumber: blankToNull(request.plateNumber),
+              vehicleColor: blankToNull(request.vehicleColor),
+              seats: request.seats ?? null,
+              ...driverDefaults(now),
+              isActive: false,
+            },
+          });
+        }
+      });
+    } catch (error) {
+      if (isUniqueConflict(error)) {
+        throw new AppException('رقم الهاتف مسجل بالفعل', 409, 'PHONE_ALREADY_REGISTERED');
       }
-    });
+      throw error;
+    }
 
     const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
-    const tokens = await this.issueTokens(user, ip);
+    const tokens = await this.issueTokens(user, {
+      ip,
+      deviceId: request.deviceId,
+      platform: request.platform,
+    });
+    if (!webTest) {
+      this.firebase.consumePhoneToken(request.firebaseIdToken!.trim(), firebaseExpiresAt);
+    }
     return { tokens, user: toProfileDto(user) };
   }
 
   async refreshToken(refreshToken: string, ip?: string): Promise<AuthTokensDto> {
-    const token = await this.prisma.refreshToken.findFirst({
-      where: { token: refreshToken },
-    });
+    this.rateLimit.hit(`refresh:${hashRefreshToken(refreshToken).slice(0, 16)}`, 30, 15 * 60_000);
+    const token = await findStoredRefreshToken(this.prisma, refreshToken);
     if (!token) {
       throw new UnauthorizedAppException('Refresh token غير صالح');
     }
@@ -204,32 +265,33 @@ export class AuthService {
     await this.prisma.$transaction([
       this.prisma.refreshToken.update({
         where: { id: token.id },
-        data: { revokedAt: now, replacedByToken: replacement },
+        data: { revokedAt: now, replacedByToken: hashRefreshToken(replacement) },
       }),
       this.prisma.refreshToken.create({
         data: {
           id: newIdValue,
           userId: user.id,
-          token: replacement,
+          token: hashRefreshToken(replacement),
           expiresAt,
           createdByIp: ip,
+          deviceId: token.deviceId,
+          platform: token.platform,
           ...baseFields(now),
         },
       }),
     ]);
 
     return {
-      accessToken: this.jwt.generateAccessToken(user),
+      accessToken: this.jwt.generateAccessToken(user, newIdValue),
       refreshToken: replacement,
       accessTokenExpiresAt: this.jwt.accessTokenExpiresAt(now),
       refreshTokenExpiresAt: expiresAt,
+      sessionId: newIdValue,
     };
   }
 
   async logout(refreshToken: string): Promise<void> {
-    const token = await this.prisma.refreshToken.findFirst({
-      where: { token: refreshToken },
-    });
+    const token = await findStoredRefreshToken(this.prisma, refreshToken);
     if (token && isRefreshActive(token)) {
       await this.prisma.refreshToken.update({
         where: { id: token.id },
@@ -263,7 +325,7 @@ export class AuthService {
     }
 
     ensureUserIsActive(linkedUser);
-    const tokens = await this.issueTokens(linkedUser, ip);
+    const tokens = await this.issueTokens(linkedUser, { ip });
     return {
       requiresPhoneVerification: false,
       provider: identity.provider,
@@ -289,8 +351,9 @@ export class AuthService {
       );
     }
 
+    this.rateLimit.hit(`social-otp:${normalizePhone(request.phone)}`, 5, 15 * 60_000);
     const result = await this.otp.sendOtp(request.phone, OtpPurpose.SocialLink);
-    return { message: result.message, debugCode: result.debugCode };
+    return { message: result.message };
   }
 
   async socialComplete(
@@ -301,79 +364,92 @@ export class AuthService {
       request.provider,
       request.firebaseIdToken,
     );
-    const valid = await this.otp.verifyOtp(
+    const phoneIdentity = await this.requirePhoneIdentity(
+      request.phoneFirebaseIdToken,
       request.phone,
-      request.code,
-      OtpPurpose.SocialLink,
     );
-    if (!valid) {
-      throw new UnauthorizedAppException(
-        'رمز التحقق غير صحيح أو منتهي الصلاحية',
-        'OTP_INVALID',
-      );
-    }
-
-    const phone = normalizePhone(request.phone);
+    const phone = phoneIdentity.phone;
     const linkedUser = await this.findLinkedUser(
       identity.provider,
       identity.providerUserId,
     );
-    let user = await this.prisma.user.findFirst({
-      where: { phone, isDeleted: false },
-    });
+    const existing = await this.phoneAccounts.resolveExisting(phoneIdentity);
+    ensureProviderNotLinkedToAnotherUser(linkedUser, existing);
 
-    ensureProviderNotLinkedToAnotherUser(linkedUser, user);
-
-    if (!user) {
+    let user;
+    if (!existing) {
       const userId = newId();
       const now = utcNow();
-      await this.prisma.$transaction([
-        this.prisma.user.create({
-          data: {
-            id: userId,
-            phone,
-            fullName: identity.displayName?.trim() || phone,
-            email: identity.email?.trim() || null,
-            avatarUrl: identity.photoUrl?.trim() || null,
-            userType: UserType.Passenger,
-            googleProviderId:
-              identity.provider === SocialAuthProvider.Google
-                ? identity.providerUserId
-                : undefined,
-            facebookProviderId:
-              identity.provider === SocialAuthProvider.Facebook
-                ? identity.providerUserId
-                : undefined,
-            ...userDefaults(now),
-          },
-        }),
-        this.prisma.wallet.create({
-          data: { id: newId(), userId, ...walletDefaults(now) },
-        }),
-      ]);
+      try {
+        await this.prisma.$transaction([
+          this.prisma.user.create({
+            data: {
+              id: userId,
+              phone,
+              fullName: identity.displayName?.trim() || phone,
+              email: identity.email?.trim() || null,
+              avatarUrl: identity.photoUrl?.trim() || null,
+              userType: UserType.Passenger,
+              firebasePhoneUid: phoneIdentity.uid,
+              googleProviderId:
+                identity.provider === SocialAuthProvider.Google
+                  ? identity.providerUserId
+                  : undefined,
+              facebookProviderId:
+                identity.provider === SocialAuthProvider.Facebook
+                  ? identity.providerUserId
+                  : undefined,
+              ...userDefaults(now),
+            },
+          }),
+          this.prisma.wallet.create({
+            data: { id: newId(), userId, ...walletDefaults(now) },
+          }),
+        ]);
+      } catch (error) {
+        if (isUniqueConflict(error)) {
+          throw new AppException(
+            'رقم الهاتف مسجل بالفعل',
+            409,
+            'PHONE_ALREADY_REGISTERED',
+          );
+        }
+        throw error;
+      }
       user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
     } else {
-      ensureUserIsActive(user);
+      const current = await this.prisma.user.findFirst({
+        where: { id: existing.id, isDeleted: false },
+      });
+      if (!current) {
+        throw new NotFoundException('المستخدم غير موجود');
+      }
+      ensureUserIsActive(current);
+      await this.phoneAccounts.bindUidIfMissing(existing, phoneIdentity.uid);
       await this.prisma.user.update({
-        where: { id: user.id },
+        where: { id: current.id },
         data: {
-          fullName: user.fullName || identity.displayName?.trim() || user.fullName,
-          email: user.email || identity.email?.trim() || user.email,
-          avatarUrl: user.avatarUrl || identity.photoUrl?.trim() || user.avatarUrl,
+          fullName: current.fullName || identity.displayName?.trim() || current.fullName,
+          email: current.email || identity.email?.trim() || current.email,
+          avatarUrl: current.avatarUrl || identity.photoUrl?.trim() || current.avatarUrl,
           googleProviderId:
             identity.provider === SocialAuthProvider.Google
               ? identity.providerUserId
-              : user.googleProviderId,
+              : current.googleProviderId,
           facebookProviderId:
             identity.provider === SocialAuthProvider.Facebook
               ? identity.providerUserId
-              : user.facebookProviderId,
+              : current.facebookProviderId,
         },
       });
-      user = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } });
+      user = await this.prisma.user.findUniqueOrThrow({ where: { id: current.id } });
     }
 
-    const tokens = await this.issueTokens(user, ip);
+    const tokens = await this.issueTokens(user, { ip });
+    this.firebase.consumePhoneToken(
+      request.phoneFirebaseIdToken!.trim(),
+      phoneIdentity.expiresAt,
+    );
     return { tokens, user: toProfileDto(user) };
   }
 
@@ -440,6 +516,7 @@ export class AuthService {
           phone: `del_${user.id.replaceAll('-', '')}`.slice(0, 36),
           googleProviderId: null,
           facebookProviderId: null,
+          firebasePhoneUid: null,
           fcmToken: null,
           updatedAt: now,
         },
@@ -449,21 +526,8 @@ export class AuthService {
 
   async sendAdminOtp(phoneRaw: string): Promise<SendOtpResponseDto> {
     const phone = normalizePhone(phoneRaw);
-    const isAdmin = await this.prisma.user.findFirst({
-      where: {
-        phone,
-        isDeleted: false,
-        isActive: true,
-        userType: UserType.Admin,
-      },
-    });
-    if (!isAdmin) {
-      throw new UnauthorizedAppException(
-        'هذا الرقم غير مصرّح له بالدخول للوحة التحكم',
-      );
-    }
-    const result = await this.otp.sendOtp(phone, OtpPurpose.Login);
-    return { message: result.message, debugCode: result.debugCode };
+    this.rateLimit.hit(`admin-otp:${phone}`, 5, 15 * 60_000);
+    return { message: 'دخول لوحة التحكم يتم برقم الهاتف وكلمة المرور' };
   }
 
   async adminLogin(
@@ -471,42 +535,31 @@ export class AuthService {
     ip?: string,
   ): Promise<AdminLoginResponse> {
     const phone = normalizePhone(request.phone);
+    this.rateLimit.hit(`admin-login:${phone}`, 8, 15 * 60_000);
+    if (ip) this.rateLimit.hit(`admin-login-ip:${ip}`, 20, 15 * 60_000);
+
+    const password = request.password ?? '';
+    const shaped = isAdminPasswordShape(password);
     const user = await this.prisma.user.findFirst({
       where: { phone, isDeleted: false },
     });
-    if (!user) {
+    const matches = await passwordMatches(password, user?.passwordHash);
+    if (
+      !shaped ||
+      !user ||
+      user.userType !== UserType.Admin ||
+      !user.isActive ||
+      !matches
+    ) {
       throw new UnauthorizedAppException('بيانات الدخول غير صحيحة');
     }
-    if (user.userType !== UserType.Admin) {
-      throw new ForbiddenAppException('هذا الحساب ليس حساب مسؤول');
-    }
-    if (!user.isActive) {
-      throw new ForbiddenAppException('الحساب موقوف. راجع مسؤول النظام');
-    }
-    const valid = await this.otp.verifyOtp(phone, request.code, OtpPurpose.Login);
-    if (!valid) {
-      throw new UnauthorizedAppException('رمز التحقق غير صحيح أو منتهي');
-    }
 
-    const now = utcNow();
-    const refreshValue = this.jwt.generateRefreshToken();
-    const expiresAt = addDays(now, 30);
-    await this.prisma.refreshToken.create({
-      data: {
-        id: newId(),
-        userId: user.id,
-        token: refreshValue,
-        expiresAt,
-        createdByIp: ip,
-        ...baseFields(now),
-      },
-    });
-
+    const tokens = await this.issueTokens(user, { ip, platform: 'admin' });
     return {
-      accessToken: this.jwt.generateAccessToken(user),
-      refreshToken: refreshValue,
-      accessTokenExpiresAt: this.jwt.accessTokenExpiresAt(now),
-      refreshTokenExpiresAt: expiresAt,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      accessTokenExpiresAt: tokens.accessTokenExpiresAt,
+      refreshTokenExpiresAt: tokens.refreshTokenExpiresAt,
       admin: toAdminIdentity(user),
     };
   }
@@ -525,28 +578,216 @@ export class AuthService {
     return toAdminIdentity(user);
   }
 
+  async changePhone(request: ChangePhoneRequest, ip?: string): Promise<AuthResponseDto> {
+    const userId = this.currentUser.requireUserId();
+    this.rateLimit.hit(`change-phone:${userId}`, 5, 15 * 60_000);
+    const identity = await this.requirePhoneIdentity(request.firebaseIdToken);
+    const user = await this.prisma.user.findFirst({
+      where: { id: userId, isDeleted: false },
+    });
+    if (!user) throw new NotFoundException('المستخدم غير موجود');
+    ensureUserIsActive(user);
+
+    if (user.phone === identity.phone) {
+      await this.phoneAccounts.bindUidIfMissing(
+        {
+          id: user.id,
+          phone: user.phone,
+          firebasePhoneUid: user.firebasePhoneUid,
+        },
+        identity.uid,
+      );
+      const tokens = await this.issueTokens(user, {
+        ip,
+        deviceId: request.deviceId,
+        platform: request.platform,
+      });
+      this.firebase.consumePhoneToken(request.firebaseIdToken.trim(), identity.expiresAt);
+      return { tokens, user: toProfileDto(user) };
+    }
+
+    const phoneOwner = await this.prisma.user.findFirst({
+      where: { phone: identity.phone, isDeleted: false, NOT: { id: user.id } },
+      select: { id: true },
+    });
+    if (phoneOwner) {
+      throw new AppException(
+        'رقم الهاتف مرتبط بحساب آخر ولن يتم دمج الحسابات',
+        409,
+        'PHONE_IN_USE',
+      );
+    }
+    const uidOwner = await this.prisma.user.findFirst({
+      where: { firebasePhoneUid: identity.uid, isDeleted: false, NOT: { id: user.id } },
+      select: { id: true },
+    });
+    if (uidOwner) {
+      throw new AppException(
+        'حساب Firebase مرتبط بحساب آخر',
+        409,
+        'FIREBASE_UID_CONFLICT',
+      );
+    }
+
+    const now = utcNow();
+    try {
+      await this.prisma.$transaction([
+        this.prisma.user.update({
+          where: { id: user.id },
+          data: {
+            phone: identity.phone,
+            firebasePhoneUid: identity.uid,
+            updatedAt: now,
+          },
+        }),
+        this.prisma.refreshToken.updateMany({
+          where: { userId: user.id, revokedAt: null },
+          data: { revokedAt: now, updatedAt: now },
+        }),
+      ]);
+    } catch (error) {
+      if (isUniqueConflict(error)) {
+        throw new AppException(
+          'رقم الهاتف مرتبط بحساب آخر ولن يتم دمج الحسابات',
+          409,
+          'PHONE_IN_USE',
+        );
+      }
+      throw error;
+    }
+
+    const updated = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } });
+    const tokens = await this.issueTokens(updated, {
+      ip,
+      deviceId: request.deviceId,
+      platform: request.platform,
+    });
+    this.firebase.consumePhoneToken(request.firebaseIdToken.trim(), identity.expiresAt);
+    return { tokens, user: toProfileDto(updated) };
+  }
+
+  async listSessions() {
+    const userId = this.currentUser.requireUserId();
+    const rows = await this.prisma.refreshToken.findMany({
+      where: {
+        userId,
+        isDeleted: false,
+        revokedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    const current = this.currentUser.sessionId;
+    return rows.map((row) => ({
+      id: row.id,
+      deviceId: row.deviceId,
+      platform: row.platform,
+      createdAt: row.createdAt,
+      expiresAt: row.expiresAt,
+      current: row.id === current,
+    }));
+  }
+
+  async revokeSession(sessionId: string): Promise<void> {
+    const userId = this.currentUser.requireUserId();
+    const row = await this.prisma.refreshToken.findFirst({
+      where: { id: sessionId, userId, isDeleted: false },
+    });
+    if (!row) throw new NotFoundException('الجلسة غير موجودة');
+    if (row.revokedAt == null) {
+      await this.prisma.refreshToken.update({
+        where: { id: row.id },
+        data: { revokedAt: utcNow() },
+      });
+    }
+  }
+
+  async revokeAllSessions(): Promise<void> {
+    const userId = this.currentUser.requireUserId();
+    await this.prisma.refreshToken.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: utcNow(), updatedAt: utcNow() },
+    });
+  }
+
+  private webChromeTest(platform?: string): boolean {
+    return process.env.NODE_ENV !== 'production' && platform === 'web';
+  }
+
+  private async verifyWebChromeTest(
+    request: VerifyOtpRequest,
+    phoneKey: string,
+    ip?: string,
+  ): Promise<AuthResponseDto> {
+    const purpose = parsePurpose(request.purpose);
+    const code = request.code?.trim() ?? '';
+    const accepted =
+      /^\d{6}$/.test(code) && (await this.otp.verifyOtp(phoneKey, code, purpose));
+    if (!accepted) {
+      throw new UnauthorizedAppException('رمز التحقق غير صحيح');
+    }
+    const user = await this.prisma.user.findFirst({
+      where: { phone: phoneKey, isDeleted: false },
+    });
+    if (!user) {
+      throw new AppException(
+        'رقم جوال غير مسجل بالنظام، يمكنك تسجيل مستخدم جديد',
+      );
+    }
+    if (purpose === OtpPurpose.Login) {
+      await this.ensureCaptainCanLogin(user, request.client);
+    }
+    const tokens = await this.issueTokens(user, {
+      ip,
+      deviceId: request.deviceId,
+      platform: request.platform,
+    });
+    return { tokens, user: toProfileDto(user) };
+  }
+
+  private async requirePhoneIdentity(token: string | undefined, claimedPhone?: string) {
+    if (!token?.trim()) {
+      throw new UnauthorizedAppException(
+        'يلزم التحقق من رقم الهاتف عبر Firebase',
+        'FIREBASE_PHONE_REQUIRED',
+      );
+    }
+    const identity = await this.firebase.verifyPhone(token.trim());
+    if (claimedPhone?.trim() && normalizePhone(claimedPhone) !== identity.phone) {
+      throw new UnauthorizedAppException(
+        'رقم الهاتف لا يطابق رمز Firebase',
+        'PHONE_CLAIM_MISMATCH',
+      );
+    }
+    return identity;
+  }
+
   private async issueTokens(
     user: { id: string; phone: string; userType: number },
-    ip?: string,
+    context: { ip?: string; deviceId?: string; platform?: string } = {},
   ): Promise<AuthTokensDto> {
     const now = utcNow();
     const refreshTokenValue = this.jwt.generateRefreshToken();
+    const sessionId = newId();
     const expiresAt = addDays(now, 30);
     await this.prisma.refreshToken.create({
       data: {
-        id: newId(),
+        id: sessionId,
         userId: user.id,
-        token: refreshTokenValue,
+        token: hashRefreshToken(refreshTokenValue),
         expiresAt,
-        createdByIp: ip,
+        createdByIp: context.ip,
+        deviceId: blankToNull(context.deviceId),
+        platform: blankToNull(context.platform),
         ...baseFields(now),
       },
     });
     return {
-      accessToken: this.jwt.generateAccessToken(user),
+      accessToken: this.jwt.generateAccessToken(user, sessionId),
       refreshToken: refreshTokenValue,
       accessTokenExpiresAt: this.jwt.accessTokenExpiresAt(now),
       refreshTokenExpiresAt: expiresAt,
+      sessionId,
     };
   }
 
@@ -561,7 +802,7 @@ export class AuthService {
       throw new AppException('تم تعطيل هذا الحساب. تواصل مع الإدارة');
     }
 
-    let driver = await this.prisma.driver.findFirst({
+    const driver = await this.prisma.driver.findFirst({
       where: { userId: user.id, isDeleted: false },
     });
 
@@ -617,18 +858,17 @@ function isDriverClient(client?: string): boolean {
   return value === 'driver' || value === 'captain';
 }
 
-function isDriverRegistration(
-  userType?: string,
-  deviceId?: string,
-  client?: string,
-): boolean {
+export function isDriverRegistration(userType?: string, client?: string): boolean {
   if (userType?.trim().toLowerCase() === 'driver') {
     return true;
   }
-  if (isDriverClient(client)) {
-    return true;
-  }
-  return Boolean(deviceId && deviceId.trim());
+  return isDriverClient(client);
+}
+
+function isUniqueConflict(error: unknown): boolean {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'
+  );
 }
 
 function blankToNull(value?: string | null): string | null {

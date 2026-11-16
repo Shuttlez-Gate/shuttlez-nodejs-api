@@ -1,56 +1,54 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createHash, randomInt } from 'crypto';
+import { createHash, randomInt, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { OtpPurpose } from '../../common/enums';
-import { normalizePhone } from '../../common/utils/phone-normalizer';
-import { addMinutes, newId } from '../../common/utils/date.util';
+import { newId } from '../../common/utils/date.util';
 import { baseFields } from '../../common/utils/entity-defaults';
+import { normalizePhone } from '../../common/utils/phone-normalizer';
 
 export interface SendOtpResult {
   message: string;
-  debugCode?: string;
 }
 
 @Injectable()
 export class OtpService {
-  private readonly logger = new Logger(OtpService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
   ) {}
 
   async sendOtp(phone: string, purpose: OtpPurpose): Promise<SendOtpResult> {
-    const normalizedPhone = normalizePhone(phone);
-    const length = Number(this.config.get('OTP_CODE_LENGTH') ?? 4);
-    const expiryMinutes = Number(this.config.get('OTP_EXPIRY_MINUTES') ?? 5);
-    const code = generateCode(length);
+    normalizePhone(phone);
+    void purpose;
+    return {
+      message: 'يتم التحقق من رقم الهاتف عبر Firebase. رمز الدخول القديم لم يعد يُستخدم',
+    };
+  }
 
+  /** Chrome-only test code. The database stores the hash, never the digits. */
+  async issueWebTestCode(phone: string, purpose: OtpPurpose): Promise<string> {
+    const normalizedPhone = normalizePhone(phone);
+    const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 5 * 60_000);
+    await this.prisma.otpRequest.updateMany({
+      where: { phone: normalizedPhone, purpose, isUsed: false },
+      data: { isUsed: true, updatedAt: now },
+    });
     await this.prisma.otpRequest.create({
       data: {
         id: newId(),
         phone: normalizedPhone,
         codeHash: hashCode(code),
         purpose,
-        expiresAt: addMinutes(new Date(), expiryMinutes),
+        expiresAt,
         attempts: 0,
         isUsed: false,
-        ...baseFields(),
+        ...baseFields(now),
       },
     });
-
-    const isDev = this.config.get('NODE_ENV') !== 'production';
-    const logInDev = this.config.get('OTP_LOG_CODE_IN_DEVELOPMENT') !== 'false';
-    if (isDev && logInDev) {
-      this.logger.warn(`OTP for ${normalizedPhone}: ${code}`);
-    } else {
-      this.logger.log(
-        `OTP generated for ${normalizedPhone} (SMS/FCM not configured)`,
-      );
-    }
-
-    return { message: 'تم إرسال رمز التحقق', debugCode: code };
+    return code;
   }
 
   async verifyOtp(
@@ -83,7 +81,7 @@ export class OtpService {
       return false;
     }
 
-    const valid = otp.codeHash === hashCode(code);
+    const valid = safeHashEquals(otp.codeHash, hashCode(code));
     await this.prisma.otpRequest.update({
       where: { id: otp.id },
       data: {
@@ -95,13 +93,13 @@ export class OtpService {
   }
 }
 
-function generateCode(length: number): string {
-  const max = 10 ** length;
-  const value = randomInt(0, max);
-  return value.toString().padStart(length, '0');
-}
-
-/** Match .NET Convert.ToHexString (uppercase hex). */
 function hashCode(code: string): string {
   return createHash('sha256').update(code, 'utf8').digest('hex').toUpperCase();
+}
+
+function safeHashEquals(stored: string, presented: string): boolean {
+  const left = Buffer.from(stored);
+  const right = Buffer.from(presented);
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
 }

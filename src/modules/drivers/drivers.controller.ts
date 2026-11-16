@@ -13,12 +13,16 @@ import { ApiBearerAuth, ApiConsumes, ApiTags } from '@nestjs/swagger';
 import { memoryStorage } from 'multer';
 import { ApiResponse } from '../../common/api-response';
 import { DriversService } from './drivers.service';
+import { CaptainPaymentsService } from './captain-payments.service';
 
 @ApiTags('drivers')
 @ApiBearerAuth()
 @Controller('api/v1/drivers')
 export class DriversController {
-  constructor(private readonly drivers: DriversService) {}
+  constructor(
+    private readonly drivers: DriversService,
+    private readonly payments: CaptainPaymentsService,
+  ) {}
 
   @Get('me')
   async me() {
@@ -63,9 +67,41 @@ export class DriversController {
     return ApiResponse.ok(result, result.message);
   }
 
+  @Post('me/trips/:tripId/cancel')
+  async cancelTrip(
+    @Param('tripId') tripId: string,
+    @Body() body?: { reason?: string },
+  ) {
+    const result = await this.drivers.cancelTrip(tripId, body?.reason);
+    return ApiResponse.ok(result, result.message);
+  }
+
   @Get('me/ratings')
   async ratings() {
     return ApiResponse.ok(await this.drivers.ratings());
+  }
+
+  @Get('me/payments')
+  async paymentsSummary() {
+    return ApiResponse.ok(await this.payments.summary());
+  }
+
+  @Post('me/payments')
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 4 * 1024 * 1024 },
+    }),
+  )
+  async submitPayment(
+    @UploadedFile() file: Express.Multer.File,
+    @Body('senderPhone') senderPhone?: string,
+  ) {
+    return ApiResponse.ok(
+      await this.payments.submit(senderPhone, file),
+      'تم إرسال التحويل وبانتظار المراجعة',
+    );
   }
 
   @Get(':id/profile')
@@ -104,6 +140,14 @@ export class DriversController {
     );
   }
 
+  @Post('me/availability')
+  async availability(@Body() body?: { online?: boolean }) {
+    return ApiResponse.ok(
+      await this.drivers.setAvailability(body?.online === true),
+      body?.online === true ? 'أنت متاح الآن' : 'أنت غير متاح',
+    );
+  }
+
   @Post('me/rides/:rideId/accept')
   async acceptRide(@Param('rideId') rideId: string) {
     const result = await this.drivers.acceptRide(rideId);
@@ -126,6 +170,12 @@ export class DriversController {
   async completeRide(@Param('rideId') rideId: string) {
     const result = await this.drivers.completeRide(rideId);
     return ApiResponse.ok(result, result.message);
+  }
+
+  @Post('me/rides/:rideId/collect')
+  async collectRide(@Param('rideId') rideId: string) {
+    const result = await this.drivers.confirmRideCash(rideId);
+    return ApiResponse.ok(result, 'تم تحصيل الرسوم');
   }
 
   @Post('me/rides/:rideId/location')
@@ -154,4 +204,36 @@ export class DriversController {
     const result = await this.drivers.completeGroup(groupId);
     return ApiResponse.ok(result, result.message);
   }
+
+  @Post('me/rides/:rideId/arrive')
+  async arriveRide(@Param('rideId') rideId: string) {
+    const result = await this.drivers.arriveRide(rideId);
+    return ApiResponse.ok(result, result.message);
+  }
+
+  @Post('me/rides/:rideId/cancel')
+  async cancelRide(
+    @Param('rideId') rideId: string,
+    @Body() body?: { reason?: string },
+  ) {
+    const result = await this.drivers.cancelRideByDriver(rideId, body?.reason);
+    return ApiResponse.ok(result, result.message);
+  }
+
+  @Post('me/rides/:rideId/terminate')
+  async terminateRide(
+    @Param('rideId') rideId: string,
+    @Body() body: { action: 'request' | 'accept' | 'reject'; reason?: string; latitude?: number; longitude?: number },
+  ) {
+    const result = await this.drivers.handleEarlyTermination(
+      rideId,
+      body.action,
+      'driver',
+      body.reason,
+      body.latitude,
+      body.longitude,
+    );
+    return ApiResponse.ok(result, result.message);
+  }
+
 }

@@ -259,6 +259,39 @@ export class FareService {
     return haversineKm(pickupLat, pickupLng, destLat, destLng);
   }
 
+  async pricePerKmForVehicle(rawKind?: string | null): Promise<number | null> {
+    const wanted = fareVehicleKey(rawKind);
+    const asOf = new Date();
+    const active = await this.prisma.rideFareRule.findMany({
+      where: {
+        isDeleted: false,
+        isActive: true,
+        OR: [{ effectiveFrom: null }, { effectiveFrom: { lte: asOf } }],
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    const usable = active.filter(
+      (rule) =>
+        (rule.effectiveTo == null || rule.effectiveTo >= asOf) &&
+        money(rule.pricePerKm) > 0,
+    );
+    if (wanted) {
+      const matched = usable.find((rule) =>
+        [rule.name, rule.fromZoneKey, rule.toZoneKey].some(
+          (value) => fareVehicleKey(value) === wanted,
+        ),
+      );
+      if (matched) return money(matched.pricePerKm);
+    }
+    const generic = usable.find(
+      (rule) =>
+        !normalizeZone(rule.fromZoneKey) &&
+        !normalizeZone(rule.toZoneKey) &&
+        fareVehicleKey(rule.name) == null,
+    );
+    return generic ? money(generic.pricePerKm) : null;
+  }
+
   resolvePricingRule(
     rules: Array<{
       routeId: string | null;
@@ -280,4 +313,25 @@ export class FareService {
 function normalizeZone(key?: string | null): string | null {
   const v = key?.trim().toLowerCase();
   return v ? v : null;
+}
+
+function fareVehicleKey(raw?: string | null): string | null {
+  const key = (raw ?? '').trim().toLowerCase().replace(/[\s_-]/g, '');
+  if (!key) return null;
+  if (key.includes('scooter') || key.includes('سكوتر')) return 'scooter';
+  if (key.includes('micro') || key.includes('ميكرو')) return 'microbus';
+  if (key.includes('mini') || key.includes('ميني')) return 'minibus';
+  if (key === 'bus' || key === '3' || key.includes('اتوبيس') || key.includes('أتوبيس')) {
+    return 'bus';
+  }
+  if (
+    key === '1' ||
+    key.includes('car') ||
+    key.includes('sedan') ||
+    key.includes('shuttle') ||
+    key.includes('عرب')
+  ) {
+    return 'car';
+  }
+  return null;
 }

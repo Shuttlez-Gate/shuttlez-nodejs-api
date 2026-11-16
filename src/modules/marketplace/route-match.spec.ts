@@ -1,6 +1,6 @@
 import { remainingForRange, type OrderedStop, type SegmentSeatRow } from './segment-occupancy';
 import { isSelfOwnedTrip } from './self-booking';
-import { matchRouteToJourney } from './route-match';
+import { matchPreviewStops, matchRouteToJourney } from './route-match';
 
 const mataria: OrderedStop = {
   id: 'mataria',
@@ -34,6 +34,23 @@ describe('captain route matching', () => {
     });
     expect(byCoords).toBeNull();
     expect(byName).toBeNull();
+  });
+
+  it('matches Helwan to Nasr City by name when the pin is outside 600m', () => {
+    const stops = [
+      { id: 'helwan', order: 1, name: 'حلوان', latitude: 29.85, longitude: 31.335 },
+      { id: 'nasr', order: 3, name: 'مدينة نصر', latitude: 30.0511, longitude: 31.3656 },
+    ];
+    const match = matchPreviewStops(stops, {
+      fromLatitude: 29.8419,
+      fromLongitude: 31.3003,
+      toLatitude: 30.0561,
+      toLongitude: 31.33,
+      fromAddress: 'حلوان، القاهرة',
+      toAddress: 'مدينة نصر، القاهرة',
+    });
+    expect(match?.origin.id).toBe('helwan');
+    expect(match?.destination.id).toBe('nasr');
   });
 
   it('matches a rider whose origin and destination sit on the route', () => {

@@ -25,7 +25,7 @@ export class JwtTokenService {
     private readonly config: ConfigService,
   ) {}
 
-  generateAccessToken(user: JwtUserPayload): string {
+  generateAccessToken(user: JwtUserPayload, sessionId?: string): string {
     const minutes = Number(this.config.get('JWT_ACCESS_TOKEN_MINUTES') ?? 60);
     const payload: Record<string, string> = {
       sub: user.id,
@@ -34,6 +34,7 @@ export class JwtTokenService {
       [NAME_ID]: user.id,
       [ROLE_URI]: userTypeName(user.userType),
     };
+    if (sessionId) payload.sid = sessionId;
 
     return this.jwt.sign(payload, {
       secret: this.config.getOrThrow<string>('JWT_SECRET'),

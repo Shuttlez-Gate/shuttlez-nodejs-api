@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { ApiResponse } from '../../common/api-response';
 import { CaptainRoutesService } from './captain-routes.service';
@@ -12,6 +12,23 @@ export class CaptainRoutesController {
   @Get('routes')
   async list() {
     return ApiResponse.ok(await this.captainRoutes.listMine());
+  }
+
+  @Get('routes/seat-quote')
+  async seatQuote(
+    @Query('originLat') originLat?: string,
+    @Query('originLng') originLng?: string,
+    @Query('destLat') destLat?: string,
+    @Query('destLng') destLng?: string,
+  ) {
+    return ApiResponse.ok(
+      await this.captainRoutes.seatQuote({
+        originLat: num(originLat),
+        originLng: num(originLng),
+        destLat: num(destLat),
+        destLng: num(destLng),
+      }),
+    );
   }
 
   @Post('routes')
@@ -48,6 +65,16 @@ export class CaptainRoutesController {
     return ApiResponse.ok(await this.captainRoutes.publish(id), 'تم نشر المسار');
   }
 
+  @Delete('routes/:id')
+  async delete(@Param('id') id: string) {
+    return ApiResponse.ok(await this.captainRoutes.deleteOwnedRoute(id), 'تم حذف المسار بنجاح');
+  }
+
+  @Post('routes/:id/toggle-active')
+  async toggleActive(@Param('id') id: string) {
+    return ApiResponse.ok(await this.captainRoutes.toggleActive(id), 'تم تحديث حالة المسار');
+  }
+
   @Get('routes/:id/share')
   async share(@Param('id') id: string) {
     return ApiResponse.ok(await this.captainRoutes.share(id));
@@ -80,4 +107,10 @@ export class CaptainRoutesController {
       'تم تسجيل طلب الإلغاء',
     );
   }
+}
+
+function num(value?: string): number | null {
+  if (value == null || value.trim() === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }

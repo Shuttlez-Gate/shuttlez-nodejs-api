@@ -1,4 +1,14 @@
-import { IsIn, IsNotEmpty, IsOptional, IsString, Length, Matches, MinLength } from 'class-validator';
+import {
+  IsIn,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Length,
+  Matches,
+  MaxLength,
+  MinLength,
+  ValidateIf,
+} from 'class-validator';
 
 export class SendOtpRequest {
   @IsNotEmpty()
@@ -16,16 +26,26 @@ export class SendOtpRequest {
   @IsOptional()
   @IsString()
   client?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  platform?: string;
 }
 
 export class VerifyOtpRequest {
   @IsNotEmpty()
   phone!: string;
 
-  @IsNotEmpty()
-  @Length(4, 4)
-  @Matches(/^\d{4}$/, { message: 'رمز التحقق يجب أن يكون 4 أرقام' })
-  code!: string;
+  @IsOptional()
+  @ValidateIf((_, value) => value != null && value !== '')
+  @Length(6, 6)
+  @Matches(/^\d{6}$/, { message: 'رمز التحقق يجب أن يكون 6 أرقام' })
+  code?: string;
+
+  @IsOptional()
+  @IsString()
+  firebaseIdToken?: string;
 
   @IsOptional()
   purpose: string = 'login';
@@ -33,6 +53,14 @@ export class VerifyOtpRequest {
   @IsOptional()
   @IsString()
   client?: string;
+
+  @IsOptional()
+  @IsString()
+  deviceId?: string;
+
+  @IsOptional()
+  @IsString()
+  platform?: string;
 }
 
 export class RegisterRequest {
@@ -49,8 +77,20 @@ export class RegisterRequest {
   @IsIn(['male', 'female', 'ذكر', 'أنثى'], { message: 'النوع غير صالح' })
   gender!: string;
 
-  @Length(4, 4)
-  code!: string;
+  @IsOptional()
+  @ValidateIf((_, value) => value != null && value !== '')
+  @Length(6, 6)
+  @Matches(/^\d{6}$/, { message: 'رمز التحقق يجب أن يكون 6 أرقام' })
+  code?: string;
+
+  @IsOptional()
+  @IsString()
+  firebaseIdToken?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  platform?: string;
 
   @IsOptional()
   userType?: string;
@@ -135,16 +175,34 @@ export class SocialCompleteRequest {
   @IsNotEmpty()
   firebaseIdToken!: string;
 
+  @IsOptional()
+  @IsString()
+  phoneFirebaseIdToken?: string;
+
   @IsNotEmpty()
   @Matches(/^\+?20\d{10}$/, {
     message: 'رقم الهاتف غير صالح. استخدم صيغة مصرية مثل +2010xxxxxxxx',
   })
   phone!: string;
 
-  @IsNotEmpty()
+  @IsOptional()
+  @ValidateIf((_, value) => value != null && value !== '')
   @Length(4, 4)
   @Matches(/^\d{4}$/, { message: 'رمز التحقق يجب أن يكون 4 أرقام' })
-  code!: string;
+  code?: string;
+}
+
+export class ChangePhoneRequest {
+  @IsNotEmpty()
+  firebaseIdToken!: string;
+
+  @IsOptional()
+  @IsString()
+  deviceId?: string;
+
+  @IsOptional()
+  @IsString()
+  platform?: string;
 }
 
 export class UpdateProfileRequest {
@@ -167,11 +225,15 @@ export class AdminSendOtpRequest {
 }
 
 export class AdminLoginRequest {
+  @IsString()
   @IsNotEmpty()
+  @MaxLength(32)
   phone!: string;
 
+  @IsString()
   @IsNotEmpty()
-  code!: string;
+  @MaxLength(128)
+  password!: string;
 }
 
 export interface UserProfileDto {
@@ -191,6 +253,7 @@ export interface AuthTokensDto {
   refreshToken: string;
   accessTokenExpiresAt: Date;
   refreshTokenExpiresAt: Date;
+  sessionId: string;
 }
 
 export interface AuthResponseDto {
@@ -200,7 +263,7 @@ export interface AuthResponseDto {
 
 export interface SendOtpResponseDto {
   message: string;
-  debugCode?: string | null;
+  testCode?: string;
 }
 
 export interface SocialLoginResultDto {

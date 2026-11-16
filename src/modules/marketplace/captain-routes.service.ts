@@ -29,7 +29,7 @@ import {
   startOfOperationalDay,
 } from '../../common/utils/operational-clock';
 import { driverDocumentMediaUrl } from '../../common/utils/document-storage';
-import { money, refCode, splitEarnings } from '../../common/utils/money';
+import { money, normalizeMoney, refCode, splitEarnings } from '../../common/utils/money';
 import { pageRequestFrom, PagedResult } from '../../common/paged-result';
 import {
   captainVehicleKind,
@@ -53,6 +53,11 @@ import {
   parseRecurrenceKind,
 } from './recurrence';
 import {
+  CAPTAIN_TRIP_LOCK_CLASS,
+  departureSlotFor,
+  isDepartureSlotConflict,
+} from './departure-slot';
+import {
   captainRouteLifecycle,
   isRecurringKind,
   tripTimeBucket,
@@ -71,7 +76,7 @@ type DriverCapacitySource = {
   id: string;
   seats: number | null;
   vehicleKind: string | null;
-  vehicle: { capacity: number; type?: number | null } | null;
+  vehicle?: { capacity: number; type?: number | null } | null;
 };
 
 type CreateTripsBody = {
@@ -327,6 +332,59 @@ export class CaptainRoutesService {
     return this.mapRoute(updated);
   }
 
+  async toggleActive(id: string) {
+    const driver = await this.requireVerifiedDriver();
+    const route = await this.requireOwnedRoute(id, driver.id);
+    const nextActive = !route.isActive;
+
+    const updated = await this.prisma.route.update({
+      where: { id: route.id },
+      data: {
+        isActive: nextActive,
+        updatedAt: utcNow(),
+      },
+      include: {
+        stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
+        trips: true,
+      },
+    });
+
+    this.logger.log({
+      event: nextActive ? 'CaptainRouteActivated' : 'CaptainRouteDeactivated',
+      routeId: updated.id,
+      driverId: driver.id,
+    });
+    return this.mapRoute(updated);
+  }
+
+  async deleteOwnedRoute(id: string) {
+    const driver = await this.requireVerifiedDriver();
+    const route = await this.requireOwnedRoute(id, driver.id);
+    await this.assertNoActiveBookings(route.id);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.stop.updateMany({
+        where: { routeId: route.id, isDeleted: false },
+        data: { isDeleted: true, updatedAt: utcNow() },
+      });
+      await tx.trip.updateMany({
+        where: {
+          routeId: route.id,
+          isDeleted: false,
+          status: { in: [TripStatus.Scheduled, TripStatus.DriverAssigned] },
+        },
+        data: { isDeleted: true, status: TripStatus.Cancelled, updatedAt: utcNow() },
+      });
+      await tx.route.update({
+        where: { id: route.id },
+        data: { isDeleted: true, isActive: false, updatedAt: utcNow() },
+      });
+    });
+
+    this.logger.log({ event: 'CaptainRouteDeleted', routeId: route.id, driverId: driver.id });
+    return { success: true, id: route.id };
+  }
+
   async share(id: string) {
     const driver = await this.requireVerifiedDriver();
     const route = await this.requireOwnedRoute(id, driver.id);
@@ -385,62 +443,126 @@ export class CaptainRoutesService {
       rangeStart,
       rangeEnd,
     });
-    const existing = await this.prisma.trip.findMany({
-      where: {
-        routeId: route.id,
-        isDeleted: false,
-        status: { not: TripStatus.Cancelled },
-      },
-      select: { scheduledAt: true },
-    });
-    const taken = new Set(existing.map((trip) => instanceKey(trip.scheduledAt)));
-    const dates = expanded.filter((date) => !taken.has(instanceKey(date)));
     const capacity =
       body.availableSeats ?? route.capacity ?? this.resolveCapacity(undefined, driver, route.vehicleKind);
     const price = Number(body.pricePerSeat);
     if (!(price > 0)) {
       throw new AppException('سعر المقعد يجب أن يكون أكبر من صفر', 400, ErrorCodes.PricingNotAvailable);
     }
+    await this.assertSeatPriceWithinSuggestion(
+      stops,
+      price,
+      route.vehicleKind,
+      route.capacity,
+    );
 
-    const createdIds: string[] = [];
-    await this.prisma.$transaction(async (tx) => {
-      let parentId: string | null = null;
-      for (const date of dates) {
-        const tripId = newId();
-        await tx.trip.create({
-          data: {
-            id: tripId,
-            routeId: route.id,
-            driverId: driver.id,
-            status: TripStatus.Scheduled,
-            scheduledAt: date,
-            pricePerSeat: new Prisma.Decimal(price),
-            availableSeats: capacity,
-            referenceCode: refCode('TR'),
-            parentTripId: parentId,
-            recurrenceKind: kind,
-            recurrenceDaysOfWeek: daysOfWeekCsv(days),
-            recurrenceStartDate:
-              kind === RecurrenceKind.Once ? null : (rangeStart ?? dates[0]),
-            recurrenceEndDate:
-              kind === RecurrenceKind.Once ? null : (rangeEnd ?? dates[dates.length - 1]),
-            ...baseFields(),
-          },
-        });
-        if (!parentId) {
-          parentId = tripId;
-        }
-        await this.segments.createForTrip(tx, tripId, stops, capacity);
-        createdIds.push(tripId);
-      }
-    });
-
-    return {
+    return this.persistGeneratedTrips({
       routeId: route.id,
-      recurrenceKind: kind,
-      count: createdIds.length,
-      tripIds: createdIds,
+      driverId: driver.id,
+      kind,
+      days,
+      dates: expanded,
+      capacity,
+      price,
+      stops,
+      rangeStart,
+      rangeEnd,
+    });
+  }
+
+  private async persistGeneratedTrips(input: GeneratedTripInput) {
+    try {
+      return await this.insertGeneratedTrips(input);
+    } catch (error) {
+      if (!isDepartureSlotConflict(error)) throw error;
+    }
+    try {
+      return await this.insertGeneratedTrips(input);
+    } catch (error) {
+      if (!isDepartureSlotConflict(error)) throw error;
+    }
+    const existing = await this.prisma.trip.findMany({
+      where: {
+        routeId: input.routeId,
+        isDeleted: false,
+        status: { not: TripStatus.Cancelled },
+        departureSlot: { in: input.dates.map((date) => departureSlotFor(date)) },
+      },
+      select: { id: true },
+    });
+    return {
+      routeId: input.routeId,
+      recurrenceKind: input.kind,
+      count: 0,
+      tripIds: existing.map((trip) => trip.id),
     };
+  }
+
+  private async insertGeneratedTrips(input: GeneratedTripInput) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(CAST(${CAPTAIN_TRIP_LOCK_CLASS} AS integer), hashtext(${input.routeId}))`;
+      const existing = await tx.trip.findMany({
+        where: {
+          routeId: input.routeId,
+          isDeleted: false,
+          status: { not: TripStatus.Cancelled },
+        },
+        select: { scheduledAt: true, departureSlot: true },
+      });
+      const taken = new Set(
+        existing.map((trip) => trip.departureSlot || departureSlotFor(trip.scheduledAt)),
+      );
+      const dates = input.dates.filter((date) => !taken.has(departureSlotFor(date)));
+      const now = utcNow();
+      const parentId = dates.length > 0 ? newId() : null;
+      const tripRows = dates.map((date, index) => ({
+        id: index === 0 ? parentId! : newId(),
+        routeId: input.routeId,
+        driverId: input.driverId,
+        status: TripStatus.Scheduled,
+        scheduledAt: date,
+        pricePerSeat: new Prisma.Decimal(input.price),
+        availableSeats: input.capacity,
+        referenceCode: refCode('TR'),
+        parentTripId: index === 0 ? null : parentId,
+        departureSlot: departureSlotFor(date),
+        recurrenceKind: input.kind,
+        recurrenceDaysOfWeek: daysOfWeekCsv(input.days),
+        recurrenceStartDate: input.kind === RecurrenceKind.Once ? null : (input.rangeStart ?? dates[0]),
+        recurrenceEndDate:
+          input.kind === RecurrenceKind.Once ? null : (input.rangeEnd ?? dates[dates.length - 1]),
+        ...baseFields(now),
+      }));
+      const segmentRows = tripRows.flatMap((trip) =>
+        input.stops.slice(0, -1).map((from, index) => {
+          const to = input.stops[index + 1];
+          return {
+            id: newId(),
+            tripId: trip.id,
+            fromStopId: from.id,
+            toStopId: to.id,
+            fromOrder: from.order,
+            toOrder: to.order,
+            capacity: input.capacity,
+            remainingSeats: input.capacity,
+            ...baseFields(now),
+          };
+        }),
+      );
+      if (tripRows.length > 0) {
+        await tx.trip.createMany({ data: tripRows });
+      }
+      if (segmentRows.length > 0) {
+        await tx.tripSegmentInventory.createMany({ data: segmentRows });
+      }
+      return {
+        routeId: input.routeId,
+        recurrenceKind: input.kind,
+        count: tripRows.length,
+        tripIds: tripRows.map((trip) => trip.id),
+      };
+    });
   }
 
   async requestCancellation(tripId: string, reason?: string) {
@@ -1088,11 +1210,16 @@ export class CaptainRoutesService {
         stopsMin(stops),
         stopsMax(stops),
       );
-      const reserved = Math.max(0, (trip.segmentInventories[0]?.capacity ?? trip.availableSeats) - remaining);
+      const segmentReserved = Math.max(
+        0,
+        (trip.segmentInventories[0]?.capacity ?? trip.availableSeats) - remaining,
+      );
+      const confirmedSeats = trip.bookings.reduce((sum, booking) => sum + booking.seatCount, 0);
       return {
         id: trip.id,
         captainRouteId: route.id,
         routeId: route.id,
+        referenceCode: trip.referenceCode,
         driverId: trip.driverId,
         status: trip.status,
         scheduledAt: trip.scheduledAt,
@@ -1100,7 +1227,12 @@ export class CaptainRoutesService {
         completedAt: trip.completedAt,
         pricePerSeat: money(trip.pricePerSeat),
         availableSeats: remaining,
-        reservedSeats: reserved,
+        reservedSeats: Math.max(segmentReserved, confirmedSeats),
+        confirmedBookingCount: trip.bookings.length,
+        passengers: trip.bookings.flatMap((booking) => {
+          const name = booking.user.fullName?.trim();
+          return name ? [name] : [];
+        }),
         capacity: trip.segmentInventories[0]?.capacity ?? route.capacity ?? trip.availableSeats,
         vehicleKind: route.vehicleKind,
         recurrenceKind: trip.recurrenceKind,
@@ -1178,6 +1310,35 @@ export class CaptainRoutesService {
         upcoming: trips.filter((t) => t.bucket === 'upcoming'),
         past: trips.filter((t) => t.bucket === 'past'),
       },
+    };
+  }
+
+  async seatQuote(input: {
+    originLat: number | null;
+    originLng: number | null;
+    destLat: number | null;
+    destLng: number | null;
+  }) {
+    const driver = await this.requireVerifiedDriver();
+    const vehicleKind = captainVehicleKind(driver);
+    const seats = this.resolveCapacity(undefined, driver, vehicleKind);
+    const distanceKm = this.fare.distanceKm(
+      input.originLat,
+      input.originLng,
+      input.destLat,
+      input.destLng,
+    );
+    const pricePerKm = await this.fare.pricePerKmForVehicle(vehicleKind);
+    const suggestedSeatPrice =
+      distanceKm != null && distanceKm > 0 && pricePerKm != null && pricePerKm > 0 && seats > 0
+        ? normalizeMoney((distanceKm * pricePerKm) / seats)
+        : null;
+    return {
+      vehicleKind,
+      seats,
+      distanceKm,
+      pricePerKm,
+      suggestedSeatPrice,
     };
   }
 
@@ -1475,7 +1636,14 @@ export class CaptainRoutesService {
   }
 
   private mapAdminListRow(
-    route: Awaited<ReturnType<CaptainRoutesService['requireCaptainRoute']>>,
+    route: Omit<Awaited<ReturnType<CaptainRoutesService['requireCaptainRoute']>>, 'trips'> & {
+      trips: Array<
+        Omit<
+          Awaited<ReturnType<CaptainRoutesService['requireCaptainRoute']>>['trips'][number],
+          'bookings'
+        >
+      >;
+    },
     now: Date,
   ) {
     const stops = route.stops.filter((s) => !s.isDeleted).sort((a, b) => a.order - b.order);
@@ -1540,6 +1708,13 @@ export class CaptainRoutesService {
           where: { isDeleted: false },
           include: {
             segmentInventories: { where: { isDeleted: false } },
+            bookings: {
+              where: {
+                isDeleted: false,
+                status: BookingStatus.Confirmed,
+              },
+              include: { user: { select: { fullName: true } } },
+            },
           },
           orderBy: { scheduledAt: 'asc' },
         },
@@ -1636,6 +1811,8 @@ export class CaptainRoutesService {
         capacity: number;
       }>;
       bookings?: Array<{ id: string }>;
+      recurrenceKind?: number | null;
+      recurrenceDaysOfWeek?: string | null;
     }>;
   }) {
     const stops = route.stops
@@ -1663,6 +1840,8 @@ export class CaptainRoutesService {
         status: trip.status,
         availableSeats: trip.availableSeats,
         activeBookings: trip.bookings?.length ?? 0,
+        recurrenceKind: trip.recurrenceKind ?? null,
+        recurrenceDaysOfWeek: trip.recurrenceDaysOfWeek ?? null,
         segments: (trip.segmentInventories ?? []).map((seg) => ({
           fromOrder: seg.fromOrder,
           toOrder: seg.toOrder,
@@ -1686,6 +1865,43 @@ export class CaptainRoutesService {
         'لا يمكن تعديل المسار بعد وجود حجوزات. أرسل طلب إلغاء.',
         400,
         ErrorCodes.RouteNotEditable,
+      );
+    }
+  }
+
+  private async assertSeatPriceWithinSuggestion(
+    stops: Array<{ latitude: unknown; longitude: unknown }>,
+    price: number,
+    vehicleKind?: string | null,
+    seats?: number | null,
+  ) {
+    const origin = stops[0];
+    const destination = stops[stops.length - 1];
+    if (
+      origin.latitude == null ||
+      origin.longitude == null ||
+      destination.latitude == null ||
+      destination.longitude == null
+    ) {
+      return;
+    }
+    const seatCount = seats ?? 0;
+    if (!(seatCount > 0)) return;
+    const perKm = await this.fare.pricePerKmForVehicle(vehicleKind);
+    if (perKm == null || !(perKm > 0)) return;
+    const distanceKm = this.fare.distanceKm(
+      Number(origin.latitude),
+      Number(origin.longitude),
+      Number(destination.latitude),
+      Number(destination.longitude),
+    );
+    if (distanceKm == null || !(distanceKm > 0)) return;
+    const suggested = normalizeMoney((distanceKm * perKm) / seatCount);
+    if (price > suggested + 0.009) {
+      throw new AppException(
+        'السعر مبالغ فيه وغير مسموح بسعر أعلى من السعر المقترح',
+        400,
+        ErrorCodes.PricingNotAvailable,
       );
     }
   }
@@ -1827,9 +2043,18 @@ function searchTripWindow(dateKey: string | null, now: Date): { gte: Date; lt: D
   };
 }
 
-function instanceKey(date: Date): string {
-  return `${cairoDateKey(date)} ${cairoClock(date)}`;
-}
+type GeneratedTripInput = {
+  routeId: string;
+  driverId: string;
+  kind: RecurrenceKind;
+  days: number[];
+  dates: Date[];
+  capacity: number;
+  price: number;
+  stops: Array<{ id: string; order: number }>;
+  rangeStart: Date | null;
+  rangeEnd: Date | null;
+};
 
 function cairoClock(date: Date): string {
   const parts = getZonedParts(date, DEFAULT_OPERATIONAL_TIMEZONE);
