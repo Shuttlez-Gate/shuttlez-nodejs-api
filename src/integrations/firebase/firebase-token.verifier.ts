@@ -4,7 +4,17 @@ import { ConfigService } from '@nestjs/config';
 import { AppException, UnauthorizedAppException } from '../../common/exceptions/app.exception';
 import { normalizePhone } from '../../common/utils/phone-normalizer';
 import { normalizeSocialProvider } from '../../modules/auth/auth.mapper';
+type FirebaseAdminModule = typeof import('firebase-admin');
 
+async function loadFirebaseAdmin(): Promise<FirebaseAdminModule> {
+  const imported = await import('firebase-admin');
+
+  const admin = (
+    imported.default ?? imported
+  ) as FirebaseAdminModule;
+
+  return admin;
+}
 export interface VerifiedSocialIdentity {
   provider: string;
   providerUserId: string;
@@ -42,7 +52,7 @@ export class FirebaseTokenVerifier {
     }
 
     try {
-      const admin = await import('firebase-admin');
+      const admin = await loadFirebaseAdmin();
       const decoded = await admin.auth(app as never).verifyIdToken(firebaseIdToken);
       const firebaseClaim = decoded.firebase as
         | { sign_in_provider?: string }
@@ -87,7 +97,7 @@ export class FirebaseTokenVerifier {
     }
 
     try {
-      const admin = await import('firebase-admin');
+     const admin = await loadFirebaseAdmin();
       const decoded = await admin
         .auth(app as never)
         .verifyIdToken(firebaseIdToken, true);
@@ -155,7 +165,7 @@ export class FirebaseTokenVerifier {
 
   private async createApp(): Promise<unknown> {
     try {
-      const admin = await import('firebase-admin');
+      const admin = await loadFirebaseAdmin();
 
       if (admin.apps.length > 0) {
         return admin.apps[0];
