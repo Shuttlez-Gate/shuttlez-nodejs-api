@@ -220,10 +220,17 @@ export class FirebaseTokenVerifier {
       }
 
       return admin.initializeApp({ projectId }, 'ShuttlezSocialAuth');
-    } catch (err) {
-      this.logger.error('Failed to initialize Firebase', err as Error);
-      return null;
-    }
+} catch (err) {
+  const error =
+    err instanceof Error ? err : new Error(String(err));
+
+  this.logger.error(
+    `Failed to initialize Firebase: ${error.name}: ${error.message}`,
+    error.stack,
+  );
+
+  return null;
+}
   }
 
 
