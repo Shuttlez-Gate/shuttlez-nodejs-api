@@ -4,7 +4,9 @@ import type { Request } from 'express';
 import { ApiResponse } from '../../common/api-response';
 import { AuthService } from './auth.service';
 import {
+  ChangePasswordRequest,
   ChangePhoneRequest,
+  PasswordLoginRequest,
   RefreshTokenRequest,
   RegisterRequest,
   SendOtpRequest,
@@ -30,6 +32,13 @@ export class AuthController {
   @Post('verify-otp')
   async verifyOtp(@Body() request: VerifyOtpRequest, @Req() req: Request) {
     const result = await this.auth.verifyOtp(request, clientIp(req));
+    return ApiResponse.ok(result, 'تم تسجيل الدخول بنجاح');
+  }
+
+  @Post('login')
+  @ApiOperation({ summary: 'Rider login with phone and password' })
+  async login(@Body() request: PasswordLoginRequest, @Req() req: Request) {
+    const result = await this.auth.loginWithPassword(request, clientIp(req));
     return ApiResponse.ok(result, 'تم تسجيل الدخول بنجاح');
   }
 
@@ -106,6 +115,13 @@ export class UsersController {
   async getMe() {
     const profile = await this.auth.getMe();
     return ApiResponse.ok(profile);
+  }
+
+  @Patch('me/password')
+  @ApiOperation({ summary: 'Set or change the signed-in rider password' })
+  async changePassword(@Body() request: ChangePasswordRequest, @Req() req: Request) {
+    const result = await this.auth.changePassword(request, clientIp(req));
+    return ApiResponse.ok(result, 'تم تغيير كلمة المرور');
   }
 
   @Patch('me/phone')

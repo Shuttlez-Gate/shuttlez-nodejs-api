@@ -12,6 +12,8 @@ export function toProfileDto(user: {
   ratingAverage: { toNumber(): number } | number;
   ratingCount: number;
   userType: number;
+  passwordHash?: string | null;
+  firebasePhoneUid?: string | null;
 }): UserProfileDto {
   const rating =
     typeof user.ratingAverage === 'number'
@@ -33,6 +35,8 @@ export function toProfileDto(user: {
     ratingAverage: rating,
     ratingCount: user.ratingCount,
     userType: userTypeNameLower(user.userType),
+    hasPassword: Boolean(user.passwordHash),
+    phoneVerified: Boolean(user.firebasePhoneUid),
   };
 }
 

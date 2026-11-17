@@ -93,6 +93,16 @@ export class RegisterRequest {
   platform?: string;
 
   @IsOptional()
+  @ValidateIf((_, value) => value != null && String(value).trim() !== '')
+  @IsString()
+  @MinLength(8)
+  @MaxLength(128)
+  @Matches(/^(?=.*[A-Za-z\u0600-\u06FF])(?=.*\d).{8,128}$/, {
+    message: 'كلمة المرور يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف ورقم',
+  })
+  password?: string;
+
+  @IsOptional()
   userType?: string;
 
   @IsOptional()
@@ -138,6 +148,48 @@ export class RegisterRequest {
 export class RefreshTokenRequest {
   @IsNotEmpty()
   refreshToken!: string;
+}
+
+export class PasswordLoginRequest {
+  @IsNotEmpty()
+  @Matches(/^\+?20\d{10}$/, {
+    message: 'رقم الهاتف غير صالح. استخدم صيغة مصرية مثل +2010xxxxxxxx',
+  })
+  phone!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
+  password!: string;
+
+  @IsOptional()
+  @IsString()
+  deviceId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(16)
+  platform?: string;
+
+  @IsOptional()
+  @IsString()
+  client?: string;
+}
+
+export class ChangePasswordRequest {
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  currentPassword?: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(8)
+  @MaxLength(128)
+  @Matches(/^(?=.*[A-Za-z\u0600-\u06FF])(?=.*\d).{8,128}$/, {
+    message: 'كلمة المرور يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف ورقم',
+  })
+  newPassword!: string;
 }
 
 export class SocialLoginRequest {
@@ -246,6 +298,8 @@ export interface UserProfileDto {
   ratingAverage: number;
   ratingCount: number;
   userType: string;
+  hasPassword: boolean;
+  phoneVerified: boolean;
 }
 
 export interface AuthTokensDto {

@@ -1,0 +1,33 @@
+
+> shuttlez-api@1.0.0 test
+> jest
+
+PASS src/modules/admin/phase8-production-safety.spec.ts
+PASS src/modules/admin/phase9-business-operations.spec.ts
+PASS src/modules/bookings/trip-history-read-model.spec.ts
+PASS src/modules/admin/semantic-invariants.spec.ts
+PASS src/modules/marketplace/captain-route-stops.spec.ts
+PASS src/modules/admin/phase7-workflow.spec.ts
+PASS src/modules/admin/operations-metrics.spec.ts
+PASS src/modules/marketplace/recurrence.spec.ts
+PASS src/modules/bookings/rider-history-bucket.spec.ts
+PASS src/modules/marketplace/segment-occupancy.spec.ts
+PASS src/modules/marketplace/route-match.spec.ts
+PASS src/common/utils/operational-clock.spec.ts
+PASS src/modules/admin/route-demand/demand-confirmation.spec.ts
+PASS src/modules/admin/route-request-workflow.spec.ts
+PASS src/modules/admin/management-metrics.spec.ts
+PASS src/common/utils/enums-map.spec.ts
+PASS src/modules/marketplace/captain-route-status.spec.ts
+PASS src/modules/marketplace/self-booking.spec.ts
+PASS src/common/utils/phone-normalizer.spec.ts
+PASS src/modules/admin/ready-without-trip.spec.ts
+PASS src/modules/admin/apply-demand-price.spec.ts
+PASS src/common/utils/money.spec.ts
+PASS src/modules/auth/auth.mapper.spec.ts
+
+Test Suites: 23 passed, 23 total
+Tests:       166 passed, 166 total
+Snapshots:   0 total
+Time:        2.295 s
+Ran all test suites.

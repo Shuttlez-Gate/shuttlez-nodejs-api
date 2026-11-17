@@ -20,6 +20,16 @@ export const DUMMY_PASSWORD_HASH =
 
 export function isAdminPasswordShape(password: string): boolean {
   if (password.length < 10 || password.length > 128) return false;
+  return hasPasswordClasses(password);
+}
+
+/** Rider passwords: 8–128 characters, at least one letter and one digit. */
+export function isRiderPasswordShape(password: string): boolean {
+  if (password.length < 8 || password.length > 128) return false;
+  return hasPasswordClasses(password);
+}
+
+function hasPasswordClasses(password: string): boolean {
   const hasLetter = /[A-Za-z\u0600-\u06FF]/.test(password);
   const hasDigit = /\d/.test(password);
   return hasLetter && hasDigit;

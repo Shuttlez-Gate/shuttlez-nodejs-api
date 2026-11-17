@@ -2,7 +2,13 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { AuthRateLimiter } from './auth-rate-limiter';
 import { PhoneAccountService } from './phone-account.service';
-import { isAdminPasswordShape, passwordMatches } from './password.util';
+import {
+  hashPassword,
+  isAdminPasswordShape,
+  isRiderPasswordShape,
+  passwordMatches,
+  verifyPassword,
+} from './password.util';
 import { findStoredRefreshToken, hashRefreshToken } from './refresh-token.util';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import {
@@ -35,7 +41,9 @@ import {
   AuthResponseDto,
   AuthTokensDto,
   RegisterRequest,
+  ChangePasswordRequest,
   ChangePhoneRequest,
+  PasswordLoginRequest,
   SendOtpRequest,
   SendOtpResponseDto,
   SocialCompleteRequest,
@@ -142,6 +150,10 @@ export class AuthService {
   }
 
   async register(request: RegisterRequest, ip?: string): Promise<AuthResponseDto> {
+    const password = request.password?.trim();
+    if (password) {
+      return this.registerWithPassword(request, password, ip);
+    }
     this.rateLimit.hit(`register:${normalizePhone(request.phone)}`, 5, 15 * 60_000);
     const webTest = this.webChromeTest(request.platform);
     let phone: string;
@@ -238,6 +250,178 @@ export class AuthService {
       this.firebase.consumePhoneToken(request.firebaseIdToken!.trim(), firebaseExpiresAt);
     }
     return { tokens, user: toProfileDto(user) };
+  }
+
+  async registerWithPassword(
+    request: RegisterRequest,
+    password: string,
+    ip?: string,
+  ): Promise<AuthResponseDto> {
+    const phone = normalizePhone(request.phone);
+    this.rateLimit.hit(`register:${phone}`, 5, 15 * 60_000);
+    if (!isRiderPasswordShape(password)) {
+      throw new AppException(
+        'كلمة المرور يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف ورقم',
+        400,
+        'PASSWORD_WEAK',
+      );
+    }
+    const existing = await this.prisma.user.findFirst({
+      where: { phone, isDeleted: false },
+      select: { id: true },
+    });
+    if (existing) {
+      throw new AppException('رقم الهاتف مسجل بالفعل', 409, 'PHONE_ALREADY_REGISTERED');
+    }
+
+    const passwordHash = await hashPassword(password);
+    const asDriver = isDriverRegistration(request.userType, request.client);
+    const userId = newId();
+    const now = utcNow();
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.user.create({
+          data: {
+            id: userId,
+            phone,
+            fullName: request.fullName,
+            email: blankToNull(request.email),
+            gender: parseGender(request.gender),
+            userType: asDriver ? UserType.Driver : UserType.Passenger,
+            passwordHash,
+            firebasePhoneUid: null,
+            ...userDefaults(now),
+          },
+        });
+        await tx.wallet.create({
+          data: { id: newId(), userId, ...walletDefaults(now) },
+        });
+        if (asDriver) {
+          await tx.driver.create({
+            data: {
+              id: newId(),
+              userId,
+              verificationStatus: DriverVerificationStatus.Pending,
+              nationalId: blankToNull(request.nationalId),
+              birthDate: parseDateOnly(request.birthDate),
+              licenseNumber: blankToNull(request.licenseNumber),
+              licenseType: blankToNull(request.licenseType),
+              licenseExpiry: parseDateOnly(request.licenseExpiry),
+              vehicleKind: blankToNull(request.vehicleKind),
+              vehicleModelName: blankToNull(request.vehicleModel),
+              manufactureYear: request.manufactureYear ?? null,
+              plateNumber: blankToNull(request.plateNumber),
+              vehicleColor: blankToNull(request.vehicleColor),
+              seats: request.seats ?? null,
+              ...driverDefaults(now),
+              isActive: false,
+            },
+          });
+        }
+      });
+    } catch (error) {
+      if (isUniqueConflict(error)) {
+        throw new AppException('رقم الهاتف مسجل بالفعل', 409, 'PHONE_ALREADY_REGISTERED');
+      }
+      throw error;
+    }
+
+    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    const tokens = await this.issueTokens(user, {
+      ip,
+      deviceId: request.deviceId,
+      platform: request.platform,
+    });
+    return { tokens, user: toProfileDto(user) };
+  }
+
+  async loginWithPassword(
+    request: PasswordLoginRequest,
+    ip?: string,
+  ): Promise<AuthResponseDto> {
+    const phone = normalizePhone(request.phone);
+    this.rateLimit.hit(`password-login:${phone}`, 8, 15 * 60_000);
+    if (ip) this.rateLimit.hit(`password-login-ip:${ip}`, 20, 15 * 60_000);
+
+    const password = request.password ?? '';
+    const shaped = isRiderPasswordShape(password);
+    const user = await this.prisma.user.findFirst({
+      where: { phone, isDeleted: false },
+    });
+    const matches = await passwordMatches(password, user?.passwordHash);
+    if (!shaped || !user || !user.isActive || !matches) {
+      throw new UnauthorizedAppException('بيانات الدخول غير صحيحة');
+    }
+    if (isDriverClient(request.client)) {
+      await this.ensureCaptainCanLogin(user, request.client);
+    }
+    const tokens = await this.issueTokens(user, {
+      ip,
+      deviceId: request.deviceId,
+      platform: request.platform,
+    });
+    return { tokens, user: toProfileDto(user) };
+  }
+
+  async changePassword(
+    request: ChangePasswordRequest,
+    ip?: string,
+  ): Promise<AuthResponseDto> {
+    const userId = this.currentUser.requireUserId('يجب تسجيل الدخول');
+    this.rateLimit.hit(`change-password:${userId}`, 8, 15 * 60_000);
+    const next = request.newPassword ?? '';
+    if (!isRiderPasswordShape(next)) {
+      throw new AppException(
+        'كلمة المرور يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف ورقم',
+        400,
+        'PASSWORD_WEAK',
+      );
+    }
+
+    const user = await this.prisma.user.findFirst({
+      where: { id: userId, isDeleted: false },
+    });
+    if (!user) throw new NotFoundException('المستخدم غير موجود');
+    ensureUserIsActive(user);
+
+    const current = request.currentPassword ?? '';
+    if (user.passwordHash) {
+      const matches = await passwordMatches(current, user.passwordHash);
+      if (!current || !matches) {
+        throw new UnauthorizedAppException('كلمة المرور الحالية غير صحيحة');
+      }
+      if (await verifyPassword(next, user.passwordHash)) {
+        throw new AppException(
+          'اختر كلمة مرور مختلفة عن الحالية',
+          400,
+          'PASSWORD_REUSED',
+        );
+      }
+    } else if (current.trim()) {
+      throw new AppException(
+        'لا توجد كلمة مرور حالية على هذا الحساب. اترك الحقل فارغًا لإنشاء أول كلمة مرور',
+        400,
+        'PASSWORD_NOT_SET',
+      );
+    }
+
+    const passwordHash = await hashPassword(next);
+    const now = utcNow();
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash, updatedAt: now },
+      }),
+      this.prisma.refreshToken.updateMany({
+        where: { userId: user.id, revokedAt: null },
+        data: { revokedAt: now, updatedAt: now },
+      }),
+    ]);
+
+    const updated = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id } });
+    const tokens = await this.issueTokens(updated, { ip, platform: 'rider' });
+    return { tokens, user: toProfileDto(updated) };
   }
 
   async refreshToken(refreshToken: string, ip?: string): Promise<AuthTokensDto> {
