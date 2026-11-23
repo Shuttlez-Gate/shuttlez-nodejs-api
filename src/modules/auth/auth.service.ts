@@ -41,6 +41,7 @@ import {
   AuthResponseDto,
   AuthTokensDto,
   RegisterRequest,
+  ResetPasswordRequest,
   ChangePasswordRequest,
   ChangePhoneRequest,
   PasswordLoginRequest,
@@ -109,6 +110,37 @@ export class AuthService {
 
     const result = await this.otp.sendOtp(phone, purpose);
     return { message: result.message };
+  }
+
+  async resetPassword(
+    request: ResetPasswordRequest,
+    ip?: string,
+  ): Promise<AuthResponseDto> {
+    const next = request.newPassword ?? '';
+    if (!isRiderPasswordShape(next)) {
+      throw new AppException(
+        'كلمة المرور يجب أن تكون 8 أحرف على الأقل وتحتوي على حرف ورقم',
+        400,
+        'PASSWORD_WEAK',
+      );
+    }
+    const session = await this.verifyOtp(
+      {
+        phone: request.phone,
+        code: request.code,
+        firebaseIdToken: request.firebaseIdToken,
+        purpose: 'login',
+        platform: request.platform,
+        deviceId: request.deviceId,
+      },
+      ip,
+    );
+    const passwordHash = await hashPassword(next);
+    await this.prisma.user.update({
+      where: { id: session.user.id },
+      data: { passwordHash, updatedAt: utcNow() },
+    });
+    return session;
   }
 
   async verifyOtp(request: VerifyOtpRequest, ip?: string): Promise<AuthResponseDto> {
@@ -492,21 +524,7 @@ export class AuthService {
       request.provider,
       request.firebaseIdToken,
     );
-    const linkedUser = await this.findLinkedUser(
-      identity.provider,
-      identity.providerUserId,
-    );
-
-    if (!linkedUser) {
-      return {
-        requiresPhoneVerification: true,
-        provider: identity.provider,
-        auth: null,
-        displayName: identity.displayName,
-        email: identity.email,
-        photoUrl: identity.photoUrl,
-      };
-    }
+    const linkedUser = await this.findOrCreateSocialUser(identity);
 
     ensureUserIsActive(linkedUser);
     const tokens = await this.issueTokens(linkedUser, { ip });
@@ -1024,6 +1042,112 @@ export class AuthService {
     }
   }
 
+  private async findOrCreateSocialUser(identity: {
+    provider: string;
+    providerUserId: string;
+    displayName?: string | null;
+    email?: string | null;
+    photoUrl?: string | null;
+  }) {
+    const existing = await this.findLinkedUser(
+      identity.provider,
+      identity.providerUserId,
+    );
+    if (existing) return existing;
+
+    const byEmail = await this.findSocialUserByEmail(identity);
+    if (byEmail) {
+      await this.prisma.user.update({
+        where: { id: byEmail.id },
+        data: {
+          ...(identity.provider === SocialAuthProvider.Google
+            ? { googleProviderId: identity.providerUserId }
+            : { facebookProviderId: identity.providerUserId }),
+          fullName:
+            byEmail.fullName ||
+            identity.displayName?.trim() ||
+            byEmail.fullName,
+          avatarUrl:
+            byEmail.avatarUrl ||
+            identity.photoUrl?.trim() ||
+            byEmail.avatarUrl,
+          email: byEmail.email || identity.email?.trim() || byEmail.email,
+          updatedAt: utcNow(),
+        },
+      });
+      return this.prisma.user.findUniqueOrThrow({ where: { id: byEmail.id } });
+    }
+
+    const userId = newId();
+    const now = utcNow();
+    try {
+      await this.prisma.$transaction([
+        this.prisma.user.create({
+          data: {
+            id: userId,
+            phone: socialPlaceholderPhone(
+              identity.provider,
+              identity.providerUserId,
+            ),
+            fullName:
+              identity.displayName?.trim() ||
+              identity.email?.trim() ||
+              'مستخدم شاتلز',
+            email: identity.email?.trim() || null,
+            avatarUrl: identity.photoUrl?.trim() || null,
+            userType: UserType.Passenger,
+            googleProviderId:
+              identity.provider === SocialAuthProvider.Google
+                ? identity.providerUserId
+                : null,
+            facebookProviderId:
+              identity.provider === SocialAuthProvider.Facebook
+                ? identity.providerUserId
+                : null,
+            ...userDefaults(now),
+          },
+        }),
+        this.prisma.wallet.create({
+          data: { id: newId(), userId, ...walletDefaults(now) },
+        }),
+      ]);
+    } catch (error) {
+      if (isUniqueConflict(error)) {
+        const again = await this.findLinkedUser(
+          identity.provider,
+          identity.providerUserId,
+        );
+        if (again) return again;
+      }
+      throw error;
+    }
+    return this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  }
+
+  private async findSocialUserByEmail(identity: {
+    provider: string;
+    providerUserId: string;
+    email?: string | null;
+  }) {
+    const email = identity.email?.trim();
+    if (!email) return null;
+    const matches = await this.prisma.user.findMany({
+      where: {
+        email: { equals: email, mode: 'insensitive' },
+        isDeleted: false,
+      },
+      take: 5,
+    });
+    const open = matches.filter((user) => {
+      const current =
+        identity.provider === SocialAuthProvider.Google
+          ? user.googleProviderId
+          : user.facebookProviderId;
+      return !current || current === identity.providerUserId;
+    });
+    return open.length === 1 ? open[0] : null;
+  }
+
   private async findLinkedUser(provider: string, providerUserId: string) {
     const normalized = normalizeSocialProvider(provider);
     if (normalized === SocialAuthProvider.Google) {
@@ -1035,6 +1159,12 @@ export class AuthService {
       where: { facebookProviderId: providerUserId, isDeleted: false },
     });
   }
+}
+
+function socialPlaceholderPhone(provider: string, providerUserId: string): string {
+  const kind = provider === SocialAuthProvider.Facebook ? 'f' : 'g';
+  const id = providerUserId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 40);
+  return `s${kind}${id}`;
 }
 
 function isDriverClient(client?: string): boolean {

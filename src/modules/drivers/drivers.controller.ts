@@ -50,9 +50,35 @@ export class DriversController {
     return ApiResponse.ok(doc, 'تم رفع المرفق');
   }
 
+  @Get('me/home')
+  async home() {
+    return ApiResponse.ok(await this.drivers.homeBoard());
+  }
+
   @Get('me/trips')
   async trips() {
     return ApiResponse.ok(await this.drivers.myTrips());
+  }
+
+  @Get('me/trips/history')
+  async tripHistory(
+    @Query('bucket') bucket?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+    @Query('kind') kind?: string,
+    @Query('status') status?: string,
+    @Query('date') date?: string,
+  ) {
+    return ApiResponse.ok(
+      await this.drivers.tripHistory({
+        bucket,
+        page: Number(page),
+        pageSize: Number(pageSize),
+        kind,
+        status,
+        date,
+      }),
+    );
   }
 
   @Post('me/trips/:tripId/start')

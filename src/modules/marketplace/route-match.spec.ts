@@ -53,6 +53,35 @@ describe('captain route matching', () => {
     expect(match?.destination.id).toBe('nasr');
   });
 
+  it('selects Wesal to Helwan when the pin is on the same station area', () => {
+    const stops = [
+      {
+        id: 'wesal',
+        order: 0,
+        name: 'مدينة وصال',
+        latitude: 30.1174388,
+        longitude: 31.5947022,
+      },
+      {
+        id: 'helwan',
+        order: 1,
+        name: 'حلوان',
+        latitude: 29.8421513,
+        longitude: 31.3333537,
+      },
+    ];
+    const match = matchPreviewStops(stops, {
+      fromLatitude: 30.1163861,
+      fromLongitude: 31.5867233,
+      toLatitude: 29.8492,
+      toLongitude: 31.3342,
+      fromAddress: 'وصال',
+      toAddress: 'حلوان',
+    });
+    expect(match?.origin.id).toBe('wesal');
+    expect(match?.destination.id).toBe('helwan');
+  });
+
   it('matches a rider whose origin and destination sit on the route', () => {
     const match = matchRouteToJourney(captainStops, {
       fromLatitude: 30.1212,

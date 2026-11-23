@@ -2,9 +2,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { groupStatusLabel, rideStatusLabel } from '../../common/utils/enums-map';
 import { money } from '../../common/utils/money';
-import { pageRequestFrom } from '../../common/paged-result';
-
-const HISTORY_MAX_PAGE_SIZE = 50;
+import { historyPageRequest, logHistoryPerf } from './history-page';
 
 export type HistoryBucket = 'upcoming' | 'past';
 
@@ -15,6 +13,8 @@ export type HistoryPageQuery = {
   date?: string;
   from?: string;
   to?: string;
+  status?: string;
+  product?: string;
 };
 
 type HistoryEntry =
@@ -26,6 +26,7 @@ export type RiderHistoryPage = {
   items: HistoryEntry[];
   page: number;
   pageSize: number;
+  totalCount: number;
   hasNextPage: boolean;
   current: HistoryEntry | null;
   hasAny: boolean;
@@ -38,18 +39,40 @@ export async function loadRiderHistoryPage(
   userId: string,
   query: HistoryPageQuery,
 ): Promise<RiderHistoryPage> {
-  const paging = pageRequestFrom(query.page, query.pageSize);
-  const pageSize = Math.min(paging.pageSize, HISTORY_MAX_PAGE_SIZE);
+  const paging = historyPageRequest(query.page, query.pageSize);
+  const pageSize = paging.pageSize;
   const page = paging.page;
-  const skip = (page - 1) * pageSize;
-  const take = pageSize + 1;
+  const skip = paging.skip;
   const date = normalizeDate(query.date);
   const range = normalizeRange(query.from, query.to);
   const bucket = query.bucket;
+  const status = normalizeHistoryStatus(query.status);
+  const product = normalizeHistoryProduct(query.product);
   const started = performance.now();
-  const [row] = await prisma.$queryRaw<
-    Array<{ items: unknown; current_item: unknown; has_any: boolean | null }>
-  >`
+  const branches = historyBranches(
+    userId,
+    bucket,
+    date,
+    range.from,
+    range.to,
+    skip + pageSize,
+    status,
+    product,
+  );
+  const countBranches = historyBranches(
+    userId,
+    bucket,
+    date,
+    range.from,
+    range.to,
+    null,
+    status,
+    product,
+  );
+  const [[row], [countRow]] = await Promise.all([
+    prisma.$queryRaw<
+      Array<{ items: unknown; current_item: unknown; has_any: boolean | null }>
+    >`
     SELECT
       COALESCE((
         SELECT jsonb_agg(
@@ -62,10 +85,10 @@ export async function loadRiderHistoryPage(
         )
         FROM (
           SELECT product, id, sort_at, payload
-          FROM (${historyBranches(userId, bucket, date, range.from, range.to, skip + take)}) merged
+          FROM (${branches}) merged
           ORDER BY sort_at DESC, id DESC
           OFFSET ${skip}
-          LIMIT ${take}
+          LIMIT ${pageSize}
         ) page_row
       ), '[]'::jsonb) AS items,
       ${
@@ -78,7 +101,7 @@ export async function loadRiderHistoryPage(
               )
               FROM (
                 SELECT product, id, sort_at, payload
-                FROM (${historyBranches(userId, 'current', date, range.from, range.to, 1)}) current_merged
+                FROM (${historyBranches(userId, 'current', date, range.from, range.to, 1, status, product)}) current_merged
                 ORDER BY sort_at DESC, id DESC
                 LIMIT 1
               ) current_row
@@ -90,27 +113,41 @@ export async function loadRiderHistoryPage(
           ? hasAnySql(userId)
           : Prisma.sql`true`
       } AS has_any
-  `;
+  `,
+    prisma.$queryRaw<Array<{ total: number }>>`
+      SELECT count(*)::int AS total
+      FROM (${countBranches}) counted
+    `,
+  ]);
   const queryMs = Math.round(performance.now() - started);
+  const totalCount = Number(countRow?.total ?? 0);
   const rawItems = asArray(row?.items);
-  const hasNextPage = rawItems.length > pageSize;
-  const pageItems = (hasNextPage ? rawItems.slice(0, pageSize) : rawItems)
+  const pageItems = rawItems
     .map(toEntry)
     .filter((entry): entry is HistoryEntry => entry != null);
+  const hasNextPage = skip + pageItems.length < totalCount;
   const current = page === 1 ? toEntry(asRecord(row?.current_item)) : null;
   const hasAny = page === 1 ? row?.has_any === true : true;
   const result: RiderHistoryPage = {
     items: pageItems,
     page,
     pageSize,
+    totalCount,
     hasNextPage,
     current,
     hasAny,
   };
   const bytes = Buffer.byteLength(JSON.stringify(result));
-  console.log(
-    `[history] bucket=${bucket} page=${page} items=${pageItems.length} hasNext=${hasNextPage} queryMs=${queryMs} bytes=${bytes}`,
-  );
+  logHistoryPerf({
+    endpoint: `GET /api/v1/trips/history bucket=${bucket} page=${page}`,
+    status: 200,
+    queryMs,
+    countMs: queryMs,
+    queries: 2,
+    bytes,
+    items: pageItems.length,
+    totalCount,
+  });
   return result;
 }
 
@@ -120,7 +157,9 @@ function historyBranches(
   day: string | null,
   fromDay: string | null,
   toDay: string | null,
-  bound: number,
+  bound: number | null,
+  status: 'completed' | 'cancelled' | null,
+  product: 'trip' | 'ride' | 'group' | 'private' | null,
 ): Prisma.Sql {
   return Prisma.sql`
     (
@@ -132,20 +171,19 @@ function historyBranches(
           h."DepartureAt" AS sort_at,
           ${tripPayload()} AS payload
         FROM "BookingsSet" b
-        INNER JOIN "TripHistoryReadModel" h
-          ON h."SourceType" = 'trip'
-         AND h."SourceId" = b."TripId"
-         AND h."IsDeleted" = false
+        ${tripHistoryJoin()}
         LEFT JOIN "StopsSet" os ON os."Id" = b."OriginStopId"
         LEFT JOIN "StopsSet" ds ON ds."Id" = b."DestinationStopId"
         WHERE b."UserId" = CAST(${userId} AS uuid)
           AND b."IsDeleted" = false
+          AND ${branchEnabled('trip', product)}
+          AND ${tripStatusSql(status)}
           AND ${tripBucketSql(bucket)}
           AND ${dayMatch(Prisma.raw('h."DepartureAt"'), day, fromDay, toDay)}
         ORDER BY h."SourceId", b."CreatedAt" DESC
       ) trip_deduped
       ORDER BY sort_at DESC, id DESC
-      LIMIT ${bound}
+      ${limitSql(bound)}
     )
     UNION ALL
     (
@@ -155,16 +193,15 @@ function historyBranches(
         h."DepartureAt" AS sort_at,
         ${ridePayload()} AS payload
       FROM "RideRequestsSet" r
-      INNER JOIN "TripHistoryReadModel" h
-        ON h."SourceType" = 'ride'
-       AND h."SourceId" = r."Id"
-       AND h."IsDeleted" = false
+      ${rideHistoryJoin()}
       WHERE r."RiderUserId" = CAST(${userId} AS uuid)
         AND r."IsDeleted" = false
+        AND ${branchEnabled('ride', product)}
+        AND ${sourceStatusSql(status, 4, 5)}
         AND ${rideBucketSql(bucket)}
         AND ${dayMatch(Prisma.raw('h."DepartureAt"'), day, fromDay, toDay)}
       ORDER BY h."DepartureAt" DESC, h."SourceId" DESC
-      LIMIT ${bound}
+      ${limitSql(bound)}
     )
     UNION ALL
     (
@@ -174,16 +211,18 @@ function historyBranches(
         h."DepartureAt" AS sort_at,
         ${groupPayload()} AS payload
       FROM "GroupMembersSet" m
-      INNER JOIN "TripHistoryReadModel" h
-        ON h."SourceType" = 'group'
-       AND h."SourceId" = m."GroupRequestId"
-       AND h."IsDeleted" = false
+      INNER JOIN "GroupRequestsSet" g
+        ON g."Id" = m."GroupRequestId"
+       AND g."IsDeleted" = false
+      ${groupHistoryJoin()}
       WHERE m."UserId" = CAST(${userId} AS uuid)
         AND m."IsDeleted" = false
+        AND ${branchEnabled('group', product)}
+        AND ${sourceStatusSql(status, 5, 6)}
         AND ${groupBucketSql(bucket)}
         AND ${dayMatch(Prisma.raw('h."DepartureAt"'), day, fromDay, toDay)}
       ORDER BY h."DepartureAt" DESC, h."SourceId" DESC
-      LIMIT ${bound}
+      ${limitSql(bound)}
     )
   `;
 }
@@ -194,25 +233,204 @@ function hasAnySql(userId: string): Prisma.Sql {
       WHEN EXISTS (
         SELECT 1
         FROM "BookingsSet" b
-        INNER JOIN "TripHistoryReadModel" h
-          ON h."SourceType" = 'trip' AND h."SourceId" = b."TripId" AND h."IsDeleted" = false
         WHERE b."UserId" = CAST(${userId} AS uuid) AND b."IsDeleted" = false
       ) OR EXISTS (
         SELECT 1
         FROM "RideRequestsSet" r
-        INNER JOIN "TripHistoryReadModel" h
-          ON h."SourceType" = 'ride' AND h."SourceId" = r."Id" AND h."IsDeleted" = false
         WHERE r."RiderUserId" = CAST(${userId} AS uuid) AND r."IsDeleted" = false
       ) OR EXISTS (
         SELECT 1
         FROM "GroupMembersSet" m
-        INNER JOIN "TripHistoryReadModel" h
-          ON h."SourceType" = 'group' AND h."SourceId" = m."GroupRequestId" AND h."IsDeleted" = false
         WHERE m."UserId" = CAST(${userId} AS uuid) AND m."IsDeleted" = false
       )
       THEN true ELSE false
     END
   )`;
+}
+
+function limitSql(bound: number | null): Prisma.Sql {
+  return bound == null ? Prisma.empty : Prisma.sql`LIMIT ${bound}`;
+}
+
+function branchEnabled(
+  name: 'trip' | 'ride' | 'group',
+  product: 'trip' | 'ride' | 'group' | 'private' | null,
+): Prisma.Sql {
+  if (product == null) return Prisma.sql`true`;
+  if (product === 'private') return name === 'trip' ? Prisma.sql`false` : Prisma.sql`true`;
+  return product === name ? Prisma.sql`true` : Prisma.sql`false`;
+}
+
+function tripStatusSql(status: 'completed' | 'cancelled' | null): Prisma.Sql {
+  if (status == null) return Prisma.sql`true`;
+  if (status === 'cancelled') {
+    return Prisma.sql`(h."Status" = 5 OR b."Status" = 3)`;
+  }
+  return Prisma.sql`(h."Status" = 4 AND b."Status" NOT IN (3, 4))`;
+}
+
+function sourceStatusSql(
+  status: 'completed' | 'cancelled' | null,
+  completed: number,
+  cancelled: number,
+): Prisma.Sql {
+  if (status == null) return Prisma.sql`true`;
+  return status === 'cancelled'
+    ? Prisma.sql`h."Status" = ${cancelled}`
+    : Prisma.sql`h."Status" = ${completed}`;
+}
+
+function normalizeHistoryStatus(value?: string): 'completed' | 'cancelled' | null {
+  const raw = (value ?? '').trim().toLowerCase();
+  if (raw === 'completed' || raw === 'finished') return 'completed';
+  if (raw === 'cancelled' || raw === 'canceled') return 'cancelled';
+  return null;
+}
+
+function normalizeHistoryProduct(
+  value?: string,
+): 'trip' | 'ride' | 'group' | 'private' | null {
+  const raw = (value ?? '').trim().toLowerCase();
+  if (raw === 'trip' || raw === 'shuttle' || raw === 'route' || raw === 'routes') return 'trip';
+  if (raw === 'ride') return 'ride';
+  if (raw === 'group') return 'group';
+  if (raw === 'private') return 'private';
+  return null;
+}
+
+function tripHistoryJoin(): Prisma.Sql {
+  return Prisma.sql`
+    INNER JOIN "TripsSet" t
+      ON t."Id" = b."TripId"
+     AND t."IsDeleted" = false
+    LEFT JOIN "RoutesSet" rt ON rt."Id" = t."RouteId"
+    LEFT JOIN "DriversSet" d ON d."Id" = t."DriverId"
+    LEFT JOIN "UsersSet" du ON du."Id" = d."UserId"
+    LEFT JOIN "TripHistoryReadModel" hm
+      ON hm."SourceType" = 'trip'
+     AND hm."SourceId" = t."Id"
+     AND hm."IsDeleted" = false
+    CROSS JOIN LATERAL (
+      SELECT
+        t."Id" AS "SourceId",
+        COALESCE(hm."DepartureAt", t."ScheduledAt") AS "DepartureAt",
+        COALESCE(hm."Status", t."Status") AS "Status",
+        COALESCE(hm."StartedAt", t."StartedAt") AS "StartedAt",
+        COALESCE(hm."SourceCreatedAt", t."CreatedAt") AS "SourceCreatedAt",
+        NULL::timestamptz AS "ScheduledFor",
+        COALESCE(hm."ReferenceCode", t."ReferenceCode") AS "ReferenceCode",
+        COALESCE(hm."RouteName", rt."Name") AS "RouteName",
+        COALESCE(hm."OwnerType", rt."OwnerType") AS "OwnerType",
+        COALESCE(hm."RouteVehicleKind", rt."VehicleKind") AS "RouteVehicleKind",
+        COALESCE(hm."RouteStartLatitude", rt."StartLatitude") AS "RouteStartLatitude",
+        COALESCE(hm."RouteStartLongitude", rt."StartLongitude") AS "RouteStartLongitude",
+        COALESCE(hm."RouteEndLatitude", rt."EndLatitude") AS "RouteEndLatitude",
+        COALESCE(hm."RouteEndLongitude", rt."EndLongitude") AS "RouteEndLongitude",
+        COALESCE(hm."DriverId", d."Id") AS "DriverId",
+        COALESCE(hm."DriverName", du."FullName") AS "DriverName",
+        COALESCE(
+          hm."DriverPhotoUrl",
+          CASE
+            WHEN du."AvatarUrl" IS NULL OR du."AvatarUrl" LIKE 'data:%' THEN NULL
+            ELSE du."AvatarUrl"
+          END
+        ) AS "DriverPhotoUrl",
+        COALESCE(hm."VehicleKind", NULLIF(btrim(COALESCE(d."VehicleKind", '')), '')) AS "VehicleKind",
+        COALESCE(hm."VehicleModel", NULLIF(btrim(COALESCE(d."VehicleModelName", '')), '')) AS "VehicleModel",
+        COALESCE(hm."VehicleColor", NULLIF(btrim(COALESCE(d."VehicleColor", '')), '')) AS "VehicleColor",
+        COALESCE(hm."PlateNumber", NULLIF(btrim(COALESCE(d."PlateNumber", '')), '')) AS "PlateNumber",
+        hm."DriverRatingAverage" AS "DriverRatingAverage",
+        hm."DriverRatingCount" AS "DriverRatingCount"
+    ) h
+  `;
+}
+
+function rideHistoryJoin(): Prisma.Sql {
+  return Prisma.sql`
+    LEFT JOIN "DriversSet" d ON d."Id" = r."DriverId"
+    LEFT JOIN "UsersSet" du ON du."Id" = d."UserId"
+    LEFT JOIN "TripHistoryReadModel" hm
+      ON hm."SourceType" = 'ride'
+     AND hm."SourceId" = r."Id"
+     AND hm."IsDeleted" = false
+    CROSS JOIN LATERAL (
+      SELECT
+        r."Id" AS "SourceId",
+        COALESCE(hm."DepartureAt", COALESCE(r."ScheduledFor", r."StartedAt", r."CreatedAt")) AS "DepartureAt",
+        COALESCE(hm."Status", r."Status") AS "Status",
+        COALESCE(hm."OriginLatitude", r."PickupLatitude") AS "OriginLatitude",
+        COALESCE(hm."OriginLongitude", r."PickupLongitude") AS "OriginLongitude",
+        COALESCE(hm."OriginName", r."PickupAddress") AS "OriginName",
+        COALESCE(hm."DestinationLatitude", r."DestinationLatitude") AS "DestinationLatitude",
+        COALESCE(hm."DestinationLongitude", r."DestinationLongitude") AS "DestinationLongitude",
+        COALESCE(hm."DestinationName", r."DestinationAddress") AS "DestinationName",
+        COALESCE(hm."TotalAmount", r."TotalAmount") AS "TotalAmount",
+        COALESCE(hm."FareAmount", r."FareAmount") AS "FareAmount",
+        COALESCE(hm."PaymentMethod", r."PaymentMethod") AS "PaymentMethod",
+        COALESCE(hm."ScheduledFor", r."ScheduledFor") AS "ScheduledFor",
+        COALESCE(hm."StartedAt", r."StartedAt") AS "StartedAt",
+        COALESCE(hm."SourceCreatedAt", r."CreatedAt") AS "SourceCreatedAt",
+        COALESCE(hm."ReferenceCode", r."ReferenceCode") AS "ReferenceCode",
+        COALESCE(hm."RequestedVehicleKind", r."RequestedVehicleKind") AS "RequestedVehicleKind",
+        COALESCE(hm."DriverId", r."DriverId") AS "DriverId",
+        COALESCE(hm."DriverName", du."FullName") AS "DriverName",
+        COALESCE(
+          hm."DriverPhotoUrl",
+          CASE
+            WHEN du."AvatarUrl" IS NULL OR du."AvatarUrl" LIKE 'data:%' THEN NULL
+            ELSE du."AvatarUrl"
+          END
+        ) AS "DriverPhotoUrl",
+        COALESCE(hm."DriverRatingAverage", d."RatingAverage") AS "DriverRatingAverage",
+        COALESCE(hm."DriverRatingCount", d."RatingCount") AS "DriverRatingCount",
+        COALESCE(hm."VehicleKind", NULLIF(btrim(COALESCE(d."VehicleKind", '')), '')) AS "VehicleKind",
+        COALESCE(hm."VehicleModel", NULLIF(btrim(COALESCE(d."VehicleModelName", '')), '')) AS "VehicleModel",
+        COALESCE(hm."VehicleColor", NULLIF(btrim(COALESCE(d."VehicleColor", '')), '')) AS "VehicleColor",
+        COALESCE(hm."PlateNumber", NULLIF(btrim(COALESCE(d."PlateNumber", '')), '')) AS "PlateNumber"
+    ) h
+  `;
+}
+
+function groupHistoryJoin(): Prisma.Sql {
+  return Prisma.sql`
+    LEFT JOIN "DriversSet" d ON d."Id" = g."DriverId"
+    LEFT JOIN "UsersSet" du ON du."Id" = d."UserId"
+    LEFT JOIN "TripHistoryReadModel" hm
+      ON hm."SourceType" = 'group'
+     AND hm."SourceId" = g."Id"
+     AND hm."IsDeleted" = false
+    CROSS JOIN LATERAL (
+      SELECT
+        g."Id" AS "SourceId",
+        COALESCE(hm."DepartureAt", COALESCE(g."StartedAt", g."CreatedAt")) AS "DepartureAt",
+        COALESCE(hm."Status", g."Status") AS "Status",
+        COALESCE(hm."OriginLatitude", g."PickupLatitude") AS "OriginLatitude",
+        COALESCE(hm."OriginLongitude", g."PickupLongitude") AS "OriginLongitude",
+        COALESCE(hm."OriginName", g."PickupAddress") AS "OriginName",
+        COALESCE(hm."DestinationLatitude", g."DestinationLatitude") AS "DestinationLatitude",
+        COALESCE(hm."DestinationLongitude", g."DestinationLongitude") AS "DestinationLongitude",
+        COALESCE(hm."DestinationName", g."DestinationAddress") AS "DestinationName",
+        COALESCE(hm."TotalAmount", g."TotalAmount") AS "TotalAmount",
+        COALESCE(hm."FareAmount", g."FareAmount") AS "FareAmount",
+        COALESCE(hm."PaymentMethod", g."PaymentMethod") AS "PaymentMethod",
+        COALESCE(hm."StartedAt", g."StartedAt") AS "StartedAt",
+        COALESCE(hm."SourceCreatedAt", g."CreatedAt") AS "SourceCreatedAt",
+        COALESCE(hm."ReferenceCode", g."ReferenceCode") AS "ReferenceCode",
+        COALESCE(hm."DriverId", g."DriverId") AS "DriverId",
+        COALESCE(hm."DriverName", du."FullName") AS "DriverName",
+        COALESCE(
+          hm."DriverPhotoUrl",
+          CASE
+            WHEN du."AvatarUrl" IS NULL OR du."AvatarUrl" LIKE 'data:%' THEN NULL
+            ELSE du."AvatarUrl"
+          END
+        ) AS "DriverPhotoUrl",
+        COALESCE(hm."DriverRatingAverage", d."RatingAverage") AS "DriverRatingAverage",
+        COALESCE(hm."DriverRatingCount", d."RatingCount") AS "DriverRatingCount",
+        COALESCE(hm."VehicleKind", NULLIF(btrim(COALESCE(d."VehicleKind", '')), '')) AS "VehicleKind",
+        COALESCE(hm."Capacity", g."Capacity") AS "Capacity"
+    ) h
+  `;
 }
 
 function tripPayload(): Prisma.Sql {

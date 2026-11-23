@@ -72,4 +72,7 @@ export const ErrorCodes = {
   SegmentUnavailable: 'SEGMENT_UNAVAILABLE',
   CancellationPending: 'CANCELLATION_PENDING',
   CancellationNotFound: 'CANCELLATION_NOT_FOUND',
+  DuplicateTransactionReference: 'DUPLICATE_TRANSACTION_REFERENCE',
+  PackagePaymentNotVerifiable: 'PACKAGE_PAYMENT_NOT_VERIFIABLE',
+  PackageNotEligible: 'PACKAGE_NOT_ELIGIBLE',
 } as const;

@@ -8,6 +8,7 @@ import {
   ChangePhoneRequest,
   PasswordLoginRequest,
   RefreshTokenRequest,
+  ResetPasswordRequest,
   RegisterRequest,
   SendOtpRequest,
   SocialCompleteRequest,
@@ -33,6 +34,13 @@ export class AuthController {
   async verifyOtp(@Body() request: VerifyOtpRequest, @Req() req: Request) {
     const result = await this.auth.verifyOtp(request, clientIp(req));
     return ApiResponse.ok(result, 'تم تسجيل الدخول بنجاح');
+  }
+
+  @Post('reset-password')
+  @ApiOperation({ summary: 'Set a new password after phone OTP' })
+  async resetPassword(@Body() request: ResetPasswordRequest, @Req() req: Request) {
+    const result = await this.auth.resetPassword(request, clientIp(req));
+    return ApiResponse.ok(result, 'تم تعيين كلمة المرور');
   }
 
   @Post('login')

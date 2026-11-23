@@ -20,6 +20,11 @@ import { newId, utcNow } from '../../common/utils/date.util';
 import { money, platformCut } from '../../common/utils/money';
 import { cairoDateKey } from '../bookings/rider-history-bucket';
 import {
+  loadCaptainHistoryPage,
+  type CaptainHistoryQuery,
+} from './captain-history-page';
+import { loadCaptainHomeBoard } from './captain-home-board';
+import {
   driverDocumentMediaUrl,
   toDataUrlStoragePath,
 } from '../../common/utils/document-storage';
@@ -54,6 +59,8 @@ import {
   publishRiderHistoryChange,
   publishTripRiders,
 } from '../realtime/rider-history-signal';
+import { PackageRideService } from '../subscriptions/package-ride.service';
+import { isPackageFunded } from '../subscriptions/package-ride.policy';
 
 @Injectable()
 export class DriversService {
@@ -66,6 +73,7 @@ export class DriversService {
     private readonly driverGateway?: DriverGateway,
     private readonly rideTrackingGateway?: RideTrackingGateway,
     private readonly tripTracking?: TripTrackingGateway,
+    private readonly packages?: PackageRideService,
   ) {}
 
   async me() {
@@ -142,6 +150,16 @@ export class DriversService {
     };
   }
 
+  async tripHistory(query: CaptainHistoryQuery) {
+    const driver = await this.requireDriver();
+    return loadCaptainHistoryPage(this.prisma, driver.id, query);
+  }
+
+  async homeBoard() {
+    const driver = await this.requireDriver();
+    return loadCaptainHomeBoard(this.prisma, driver);
+  }
+
   async myTrips() {
     const driver = await this.requireDriver();
     const now = utcNow();
@@ -166,7 +184,10 @@ export class DriversService {
       const ui = resolveUiStatus(t.status, t.scheduledAt, now);
       const lastStop = [...t.route.stops].sort((a, b) => b.order - a.order)[0];
       const isCaptainRoute = t.route.ownerDriverId === driver.id;
-      const collectedTotal = confirmed.reduce((sum, booking) => {
+      const cashBookings = confirmed.filter(
+        (booking) => !isPackageFunded(booking.paymentMethod, booking.usesSubscriptionCredit),
+      );
+      const collectedTotal = cashBookings.reduce((sum, booking) => {
         const row =
           money(booking.totalAmount) > 0
             ? money(booking.totalAmount)
@@ -221,6 +242,8 @@ export class DriversService {
             money(b.totalAmount) > 0
               ? money(b.totalAmount)
               : money(b.pricePerSeat) * b.seatCount,
+          paymentMethod: b.paymentMethod || 'cash',
+          packageRide: isPackageFunded(b.paymentMethod, b.usesSubscriptionCredit),
           originStopId: b.originStopId,
           destinationStopId: b.destinationStopId,
         })),
@@ -488,6 +511,7 @@ export class DriversService {
           where: { tripId: trip.id, isDeleted: false },
           data: { status: BookingStatus.Cancelled, updatedAt: utcNow() },
         });
+        await this.packages?.releaseTrip(trip.id);
       }
       return { tripId: trip.id, status: 'Cancelled', message: 'تم إلغاء الرحلة بنجاح' };
     }
@@ -1000,6 +1024,7 @@ export class DriversService {
       return lifecycle('trip', updated.id, driver.id, updated.status, updated.startedAt, updated.completedAt, 'تم بدء الرحلة');
     }
     if (trip.status === TripStatus.Completed) {
+      await this.packages?.finalizeTrip(trip.id);
       return lifecycle('trip', trip.id, driver.id, trip.status, trip.startedAt, trip.completedAt, 'الرحلة مكتملة بالفعل', true);
     }
     if (trip.status !== TripStatus.InProgress) {
@@ -1009,6 +1034,7 @@ export class DriversService {
       where: { id: trip.id },
       data: { status: TripStatus.Completed, completedAt: utcNow(), updatedAt: utcNow() },
     });
+    await this.packages?.finalizeTrip(updated.id);
     await publishTripRiders(this.prisma, updated.id);
     return lifecycle('trip', updated.id, driver.id, updated.status, updated.startedAt, updated.completedAt, 'تم إنهاء الرحلة');
   }

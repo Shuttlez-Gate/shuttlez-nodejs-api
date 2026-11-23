@@ -1,4 +1,6 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Prisma } from '@prisma/client';
 import { ApiResponse } from '../../common/api-response';
@@ -38,6 +40,8 @@ import { publishRiderHistoryChange } from '../realtime/rider-history-signal';
 import { riderHistoryBucket } from './rider-history-bucket';
 import { isSelfOwnedTrip, tripsNotOwnedByViewer } from '../marketplace/self-booking';
 import { matchPreviewStops } from '../marketplace/route-match';
+import { PackageRideService } from '../subscriptions/package-ride.service';
+import { lineLabels } from '../subscriptions/package-ride.policy';
 
 @ApiTags('bookings')
 @Controller('api/v1/bookings')
@@ -48,6 +52,7 @@ export class BookingsController {
     private readonly fare: FareService,
     private readonly segments: SegmentInventoryService,
     private readonly push: PushNotificationService,
+    private readonly packages?: PackageRideService,
   ) {}
 
   @Get('preview')
@@ -283,9 +288,12 @@ export class BookingsController {
     }
 
     const requestedVehicle = previewVehicleBucket(vehicleTypeIndex);
-    const matchedOffers = requestedVehicle
+    const bucketed = requestedVehicle
       ? offers.filter((offer) => offer.vehicleBucket === requestedVehicle)
       : offers;
+    // The line matched the stations. Keep it selectable when the default
+    // vehicle chip is a different bucket.
+    const matchedOffers = bucketed.length > 0 ? bucketed : offers;
     // Calendar days from Cairo "today" forward (never past local days).
     const days = nextSevenCairoDays(now);
     const offersPerDay = days.map((day) =>
@@ -321,6 +329,7 @@ export class BookingsController {
       originStopId?: string;
       destinationStopId?: string;
       vehicleKind?: string;
+      subscriptionId?: string;
     },
   ) {
     const userId = this.currentUser.requireUserId();
@@ -418,6 +427,23 @@ export class BookingsController {
     const referenceCode = refCode('BK');
 
     await this.prisma.$transaction(async (tx) => {
+      if (paymentMethod === 'subscription') {
+        const mode = this.packages
+          ? await this.packages.reserveForBooking(tx, {
+              userId,
+              bookingId,
+              routeId: trip.routeId,
+              originOrder: origin?.order ?? null,
+              destinationOrder: destination?.order ?? null,
+              vehicleKind: body.vehicleKind ?? trip.route.vehicleKind ?? null,
+              subscriptionId: body.subscriptionId,
+              stopNames: [origin?.name, destination?.name, ...lineLabels(trip.route.name)].filter(
+                (name): name is string => Boolean(name?.trim()),
+              ),
+            })
+          : 'legacy';
+        if (mode === 'legacy') await assertSubscriptionCredit(tx, userId);
+      }
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${trip.id}))`;
       const fresh = await tx.trip.findFirst({
         where: { id: trip.id, isDeleted: false },
@@ -518,14 +544,19 @@ export class BookingsController {
         referenceCode,
         totalAmount,
         status: bookingStatusLabel(BookingStatus.Confirmed),
-        message: 'تم تأكيد الحجز — الدفع نقدًا للكابتن',
+        message:
+          paymentMethod === 'subscription'
+            ? 'تم تأكيد الحجز من الباقة'
+            : 'تم تأكيد الحجز — الدفع نقدًا للكابتن',
         pricePerSeat,
         seatCount,
         paymentMethod,
         originStopId: origin?.id ?? null,
         destinationStopId: destination?.id ?? null,
       },
-      'تم تأكيد الحجز — الدفع نقدًا للكابتن',
+      paymentMethod === 'subscription'
+        ? 'تم تأكيد الحجز من الباقة'
+        : 'تم تأكيد الحجز — الدفع نقدًا للكابتن',
     );
   }
 
@@ -576,6 +607,7 @@ export class TripsController {
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
     private readonly segments: SegmentInventoryService,
+    private readonly packageRides?: PackageRideService,
   ) {}
 
   @Get('history')
@@ -586,6 +618,8 @@ export class TripsController {
     @Query('date') date?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
+    @Query('status') status?: string,
+    @Query('product') product?: string,
   ) {
     const userId = this.currentUser.requireUserId();
     const selected = bucket === 'past' ? 'past' : 'upcoming';
@@ -597,6 +631,8 @@ export class TripsController {
         date,
         from,
         to,
+        status,
+        product,
       }),
     );
   }
@@ -828,6 +864,7 @@ export class TripsController {
         where: { id: booking.id },
         data: { status: BookingStatus.Cancelled, updatedAt: utcNow() },
       });
+      if (this.packageRides) await this.packageRides.releaseBooking(tx, booking.id);
       if (booking.originStop && booking.destinationStop) {
         await this.segments.tryIncrementRange(
           tx,
@@ -860,34 +897,112 @@ export class SubscriptionPackagesController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly currentUser: CurrentUserService,
+    private readonly packageRides: PackageRideService,
   ) {}
 
   @Get()
   async packages() {
     const userId = this.currentUser.userId;
-    let activeId: string | null = null;
-    if (userId) {
-      const user = await this.prisma.user.findFirst({
-        where: { id: userId, isDeleted: false },
-        select: { activeSubscriptionPackageId: true },
-      });
-      activeId = user?.activeSubscriptionPackageId ?? null;
-    }
+    const user = userId
+      ? await this.prisma.user.findFirst({
+          where: { id: userId, isDeleted: false },
+          select: {
+            id: true,
+            activeSubscriptionPackageId: true,
+            subscriptionExpiresAt: true,
+            subscriptionActivatedAt: true,
+          },
+        })
+      : null;
+    const activeId = user?.activeSubscriptionPackageId ?? null;
+    const usedTrips =
+      user && activeId ? await this.prisma.booking.count({ where: subscriptionCreditWhere(user) }) : 0;
+    const ledger = userId ? await this.packageRides.usageForUser(userId) : [];
     const items = await this.prisma.subscriptionPackage.findMany({
       where: { isActive: true, isDeleted: false },
+      include: { route: { select: { id: true, name: true } } },
       orderBy: { price: 'asc' },
     });
     return ApiResponse.ok(
-      items.map((p) => ({
-        id: p.id,
-        name: p.name,
-        title: p.name,
-        description: p.description,
-        price: money(p.price),
-        tripCount: p.tripCount,
-        validityDays: p.validityDays,
-        isCurrent: activeId != null && p.id === activeId,
-      })),
+      items.map((p) => {
+        const current = ledger.find((row) => row.packageId === p.id && row.isActive);
+        const isCurrent = current != null || (activeId != null && p.id === activeId);
+        const fields = this.packageRides.packageFields(p);
+        return {
+          id: p.id,
+          name: p.name,
+          title: p.name,
+          description: p.description,
+          price: money(p.price),
+          tripCount: p.tripCount,
+          validityDays: p.validityDays,
+          isCurrent,
+          ...fields,
+          ...(isCurrent
+            ? {
+                usedTrips: current
+                  ? current.ridesUsed + current.ridesReserved
+                  : usedTrips,
+                remainingTrips:
+                  current?.remainingTrips ??
+                  (p.tripCount > 0 ? Math.max(0, p.tripCount - usedTrips) : null),
+                expiresAt: current?.expiresAt ?? user?.subscriptionExpiresAt ?? null,
+                activatedAt: current?.activatedAt ?? user?.subscriptionActivatedAt ?? null,
+              }
+            : {}),
+        };
+      }),
+    );
+  }
+
+  @Get('eligible')
+  async eligible(
+    @Query('tripId') tripId?: string,
+    @Query('originStopId') originStopId?: string,
+    @Query('destinationStopId') destinationStopId?: string,
+  ) {
+    const userId = this.currentUser.requireUserId();
+    if (!tripId) throw new AppException('الرحلة مطلوبة', 400);
+    return ApiResponse.ok(
+      await this.packageRides.eligibleForTrip(userId, tripId, originStopId, destinationStopId),
+    );
+  }
+
+  @Get('purchases')
+  async purchases() {
+    const userId = this.currentUser.requireUserId();
+    return ApiResponse.ok(await this.packageRides.myPurchases(userId));
+  }
+
+  @Post('purchases/:id/submit')
+  @UseInterceptors(
+    FileInterceptor('screenshot', {
+      storage: memoryStorage(),
+      limits: { fileSize: 5 * 1024 * 1024 },
+    }),
+  )
+  async submitPurchase(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      transactionReference?: string;
+      transferredAt?: string;
+      screenshotBase64?: string;
+      screenshotMime?: string;
+    },
+    @UploadedFile() file?: { mimetype?: string; buffer: Buffer; size: number },
+  ) {
+    const userId = this.currentUser.requireUserId();
+    const uploaded = file?.buffer?.length
+      ? { mime: file.mimetype || 'application/octet-stream', bytes: file.buffer }
+      : decodeScreenshot(body.screenshotBase64, body.screenshotMime);
+    return ApiResponse.ok(
+      await this.packageRides.submitPayment(userId, id, {
+        transactionReference: body.transactionReference,
+        transferredAt: body.transferredAt,
+        screenshot: uploaded,
+      }),
+      'تم إرسال بيانات التحويل وبانتظار المراجعة',
     );
   }
 
@@ -903,34 +1018,180 @@ export class SubscriptionPackagesController {
     const pkg = await this.prisma.subscriptionPackage.findFirst({
       where: { id: user.activeSubscriptionPackageId },
     });
+    const where = subscriptionCreditWhere(user);
+    const [usedTrips, bookings] = await Promise.all([
+      this.prisma.booking.count({ where }),
+      this.prisma.booking.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+        include: {
+          originStop: { select: { name: true } },
+          destinationStop: { select: { name: true } },
+          trip: {
+            select: {
+              scheduledAt: true,
+              status: true,
+              route: {
+                select: {
+                  vehicleKind: true,
+                  stops: {
+                    where: { isDeleted: false },
+                    orderBy: { order: 'asc' },
+                    select: { name: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+      }),
+    ]);
+    const tripCount = pkg?.tripCount ?? 0;
+    const expiresAt = user.subscriptionExpiresAt;
+    const subscriptions = await this.packageRides.usageForUser(userId);
+    const primary = subscriptions.find((row) => row.isActive) ?? subscriptions[0];
     return ApiResponse.ok({
-      packageId: user.activeSubscriptionPackageId,
-      packageName: pkg?.name ?? null,
-      expiresAt: user.subscriptionExpiresAt,
-      activatedAt: user.subscriptionActivatedAt,
+      packageId: primary?.packageId ?? user.activeSubscriptionPackageId,
+      packageName: primary?.packageName ?? pkg?.name ?? null,
+      title: primary?.title ?? pkg?.name ?? '',
+      tripCount: primary?.ridesTotal ?? tripCount,
+      price: primary?.price ?? (pkg ? money(pkg.price) : 0),
+      validityDays: primary?.validityDays ?? pkg?.validityDays ?? 30,
+      expiresAt: primary?.expiresAt ?? expiresAt,
+      activatedAt: primary?.activatedAt ?? user.subscriptionActivatedAt,
+      isActive: primary ? primary.isActive : expiresAt == null || expiresAt.getTime() >= Date.now(),
+      usedTrips: primary ? primary.ridesUsed + primary.ridesReserved : usedTrips,
+      remainingTrips:
+        primary?.remainingTrips ??
+        (tripCount > 0 ? Math.max(0, tripCount - usedTrips) : null),
+      routeName: primary?.routeName ?? null,
+      direction: primary?.direction ?? null,
+      subscriptions,
+      bookings: mergePackageBookings(
+        primary?.bookings,
+        bookings.map((booking) => {
+        const stops = booking.trip?.route?.stops ?? [];
+        const tripStatus = booking.trip?.status;
+        const status =
+          tripStatus === TripStatus.Completed
+            ? 'finished'
+            : tripStatus === TripStatus.Cancelled
+              ? 'cancelled'
+              : 'upcoming';
+        return {
+          id: booking.id,
+          referenceCode: booking.referenceCode ?? '',
+          status,
+          scheduledAt: booking.trip?.scheduledAt ?? booking.createdAt,
+          from: booking.originStop?.name || stops[0]?.name || '',
+          to:
+            booking.destinationStop?.name ||
+            stops[stops.length - 1]?.name ||
+            '',
+          vehicleKind:
+            booking.vehicleKind || booking.trip?.route?.vehicleKind || '',
+        };
+      }),
+      ),
     });
   }
 
   @Post(':id/subscribe')
   async subscribe(@Param('id') id: string) {
     const userId = this.currentUser.requireUserId();
-    const pkg = await this.prisma.subscriptionPackage.findFirst({
-      where: { id, isActive: true, isDeleted: false },
-    });
-    if (!pkg) {
-      throw new NotFoundException('الباقة غير موجودة');
-    }
-    const expires = new Date();
-    expires.setUTCDate(expires.getUTCDate() + pkg.validityDays);
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: {
-        activeSubscriptionPackageId: pkg.id,
-        subscriptionActivatedAt: utcNow(),
-        subscriptionExpiresAt: expires,
-      },
-    });
-    return ApiResponse.ok({ packageId: pkg.id, expiresAt: expires });
+    return ApiResponse.ok(
+      await this.packageRides.createPurchase(userId, id),
+      'تم إنشاء طلب الدفع. الباقة تتفعل بعد مراجعة التحويل.',
+    );
+  }
+}
+
+function decodeScreenshot(
+  raw?: string,
+  mime?: string,
+): { mime: string; bytes: Buffer } | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  const data = value.startsWith('data:') ? value.slice(value.indexOf(',') + 1) : value;
+  const declared = value.startsWith('data:')
+    ? value.slice(5, value.indexOf(';'))
+    : mime || 'image/jpeg';
+  const bytes = Buffer.from(data, 'base64');
+  return { mime: declared, bytes };
+}
+
+function mergePackageBookings<T extends { id: string }>(
+  primary: T[] | undefined,
+  legacy: T[],
+): T[] {
+  const seen = new Set((primary ?? []).map((row) => row.id));
+  return [...(primary ?? []), ...legacy.filter((row) => !seen.has(row.id))];
+}
+
+function subscriptionCreditWhere(user: {
+  id: string;
+  subscriptionActivatedAt: Date | null;
+}): Prisma.BookingWhereInput {
+  return {
+    userId: user.id,
+    isDeleted: false,
+    status: { in: [BookingStatus.Pending, BookingStatus.Confirmed] },
+    OR: [
+      { usesSubscriptionCredit: true },
+      { paymentMethod: { in: ['subscription', 'package', 'باقة'] } },
+    ],
+    ...(user.subscriptionActivatedAt
+      ? { createdAt: { gte: user.subscriptionActivatedAt } }
+      : {}),
+  };
+}
+
+async function assertSubscriptionCredit(
+  tx: Prisma.TransactionClient,
+  userId: string,
+) {
+  const user = await tx.user.findFirst({
+    where: { id: userId, isDeleted: false },
+    select: {
+      id: true,
+      activeSubscriptionPackageId: true,
+      subscriptionExpiresAt: true,
+      subscriptionActivatedAt: true,
+    },
+  });
+  const expires = user?.subscriptionExpiresAt;
+  if (
+    !user?.activeSubscriptionPackageId ||
+    (expires != null && expires.getTime() < Date.now())
+  ) {
+    throw new AppException(
+      'انتهت صلاحية الباقة. برجاء التجديد أو الدفع نقدًا.',
+      400,
+      ErrorCodes.SubscriptionExpired,
+    );
+  }
+  const pkg = await tx.subscriptionPackage.findFirst({
+    where: { id: user.activeSubscriptionPackageId, isDeleted: false },
+    select: { tripCount: true },
+  });
+  if (!pkg) {
+    throw new AppException(
+      'انتهت صلاحية الباقة. برجاء التجديد أو الدفع نقدًا.',
+      400,
+      ErrorCodes.SubscriptionExpired,
+    );
+  }
+  if (pkg.tripCount <= 0) return;
+  const used = await tx.booking.count({
+    where: subscriptionCreditWhere(user),
+  });
+  if (used >= pkg.tripCount) {
+    throw new AppException(
+      'لقد استنفدت رحلات الباقة. اشترك في باقة جديدة أو ادفع نقدًا.',
+      400,
+      ErrorCodes.SubscriptionLimitReached,
+    );
   }
 }
 

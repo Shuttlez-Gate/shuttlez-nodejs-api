@@ -11,14 +11,19 @@ import {
 import { ApiTags } from '@nestjs/swagger';
 import { Prisma } from '@prisma/client';
 import { ApiResponse } from '../../common/api-response';
+import { CurrentUserService } from '../../common/current-user.service';
 import { AdminOnly } from '../../common/decorators/admin-only.decorator';
 import { PrismaService } from '../../database/prisma/prisma.service';
-import { NotFoundException } from '../../common/exceptions/app.exception';
+import { AppException, NotFoundException } from '../../common/exceptions/app.exception';
 import { newId, utcNow } from '../../common/utils/date.util';
 import { baseFields } from '../../common/utils/entity-defaults';
 import { money, splitEarnings } from '../../common/utils/money';
 import { parseVehicleType, vehicleTypeLabel } from '../../common/utils/enums-map';
 import { BookingStatus } from '../../common/enums';
+import { PackageRideService } from '../subscriptions/package-ride.service';
+import { normalizeDirection } from '../subscriptions/package-ride.policy';
+import { PushNotificationService } from '../marketplace/push-notification.service';
+import { PackagePaymentGateway } from '../realtime/package-payment.gateway';
 
 @ApiTags('admin-faq')
 @AdminOnly()
@@ -131,12 +136,19 @@ export class AdminLegalController {
 @AdminOnly()
 @Controller('api/v1/admin/packages')
 export class AdminPackagesController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly packages: PackageRideService,
+    private readonly currentUser: CurrentUserService,
+    private readonly push: PushNotificationService,
+    private readonly packagePayments: PackagePaymentGateway,
+  ) {}
 
   @Get()
   async list() {
     const items = await this.prisma.subscriptionPackage.findMany({
       where: { isDeleted: false },
+      include: { route: { select: { id: true, name: true } } },
       orderBy: { price: 'asc' },
     });
     return ApiResponse.ok(
@@ -148,12 +160,74 @@ export class AdminPackagesController {
         tripCount: p.tripCount,
         validityDays: p.validityDays,
         isActive: p.isActive,
+        ...this.packages.packageFields(p),
       })),
     );
   }
 
+  @Get('purchases')
+  async purchases(@Query('status') status?: string) {
+    return ApiResponse.ok(await this.packages.adminListPurchases(status));
+  }
+
+  @Post('purchases/:id/approve')
+  async approve(@Param('id') id: string, @Body() body: { note?: string }) {
+    const adminId = this.currentUser.requireUserId();
+    const result = await this.packages.adminApprove(id, adminId, body?.note);
+    await this.notifyRider(result, 'approved');
+    return ApiResponse.ok(result, 'تم تأكيد الدفع وتفعيل الباقة');
+  }
+
+  @Post('purchases/:id/reject')
+  async reject(@Param('id') id: string, @Body() body: { reason?: string }) {
+    const adminId = this.currentUser.requireUserId();
+    const result = await this.packages.adminReject(id, adminId, body?.reason ?? '');
+    await this.notifyRider(result, 'rejected', body?.reason);
+    return ApiResponse.ok(result, 'تم رفض الدفع');
+  }
+
+  private async notifyRider(
+    result: {
+      purchaseId: string;
+      userId?: string;
+      packageName?: string;
+      status: string;
+      idempotent?: boolean;
+    },
+    decision: 'approved' | 'rejected',
+    reason?: string,
+  ) {
+    const userId = result.userId;
+    if (!userId) return;
+    const packageName = result.packageName || 'الباقة';
+    const rejected = decision === 'rejected';
+    const message = rejected
+      ? `تم رفض دفع ${packageName}. ${reason?.trim() || 'راجع صورة التحويل وأعد الإرسال.'}`
+      : `تم تأكيد دفع ${packageName} وتفعيلها.`;
+    this.packagePayments.publish(userId, {
+      purchaseId: result.purchaseId,
+      status: result.status,
+      packageName,
+      message,
+      reason: rejected ? reason?.trim() || null : null,
+    });
+    if (result.idempotent) return;
+    try {
+      await this.push.notifyUser(
+        userId,
+        rejected ? 'تم رفض دفع الباقة' : 'تم تأكيد دفع الباقة',
+        message,
+        'package_payment',
+        { purchaseId: result.purchaseId, status: result.status },
+      );
+    } catch {
+      // Approval already succeeded. The open screen still receives the socket event.
+    }
+  }
+
   @Post()
   async create(@Body() body: SavePackage) {
+    await this.assertRoute(body.routeId);
     const item = await this.prisma.subscriptionPackage.create({
       data: {
         id: newId(),
@@ -163,11 +237,15 @@ export class AdminPackagesController {
         tripCount: body.tripCount,
         validityDays: body.validityDays,
         isActive: body.isActive ?? true,
+        routeId: body.routeId || null,
+        direction: normalizeDirection(body.direction),
+        vehicleKind: body.vehicleKind?.trim() || null,
         ...baseFields(),
       },
+      include: { route: { select: { id: true, name: true } } },
     });
     return ApiResponse.ok(
-      { ...item, price: money(item.price) },
+      { ...item, price: money(item.price), ...this.packages.packageFields(item) },
       'تمت الإضافة',
     );
   }
@@ -180,6 +258,7 @@ export class AdminPackagesController {
     if (!existing) {
       throw new NotFoundException('الباقة غير موجودة');
     }
+    await this.assertRoute(body.routeId);
     const item = await this.prisma.subscriptionPackage.update({
       where: { id },
       data: {
@@ -189,10 +268,17 @@ export class AdminPackagesController {
         tripCount: body.tripCount,
         validityDays: body.validityDays,
         isActive: body.isActive ?? true,
+        routeId: body.routeId || null,
+        direction: normalizeDirection(body.direction),
+        vehicleKind: body.vehicleKind?.trim() || null,
         updatedAt: utcNow(),
       },
+      include: { route: { select: { id: true, name: true } } },
     });
-    return ApiResponse.ok({ ...item, price: money(item.price) }, 'تم التحديث');
+    return ApiResponse.ok(
+      { ...item, price: money(item.price), ...this.packages.packageFields(item) },
+      'تم التحديث',
+    );
   }
 
   @Delete(':id')
@@ -208,6 +294,15 @@ export class AdminPackagesController {
       data: { isDeleted: true, updatedAt: utcNow() },
     });
     return ApiResponse.ok(true, 'تم الحذف');
+  }
+
+  private async assertRoute(routeId?: string) {
+    if (!routeId) return;
+    const route = await this.prisma.route.findFirst({
+      where: { id: routeId, isDeleted: false },
+      select: { id: true },
+    });
+    if (!route) throw new AppException('الخط غير موجود', 400);
   }
 }
 
@@ -451,6 +546,9 @@ type SavePackage = {
   tripCount: number;
   validityDays: number;
   isActive?: boolean;
+  routeId?: string;
+  direction?: string;
+  vehicleKind?: string;
 };
 type SaveCommission = {
   name: string;

@@ -1,6 +1,8 @@
 import { haversineKm, normalizeMoney } from '../../common/utils/money';
 
 export const MATCH_RADIUS_METERS = 600;
+/** A pin on the same station area can sit a little past the strict radius. */
+export const PREVIEW_MATCH_RADIUS_METERS = 1200;
 
 export type OrderedStop = {
   id: string;

@@ -31,14 +31,19 @@ export class NotificationsController {
       where: { userId, isDeleted: false },
       orderBy: { createdAt: 'desc' },
     });
-    const mapped = items.map((n) => ({
-      id: n.id,
-      title: n.title,
-      body: n.body,
-      time: formatHm(n.createdAt),
-      isUnread: !n.isRead,
-      createdAt: n.createdAt,
-    }));
+    const mapped = items.map((n) => {
+      const stored = splitNotificationType(n.type);
+      return {
+        id: n.id,
+        title: n.title,
+        body: n.body,
+        time: formatHm(n.createdAt),
+        isUnread: !n.isRead,
+        createdAt: n.createdAt,
+        type: stored.type,
+        ...(stored.tripId ? { tripId: stored.tripId } : {}),
+      };
+    });
     const groups = new Map<string, typeof mapped>();
     for (const item of mapped) {
       const key = formatDateLabel(item.createdAt);
@@ -115,6 +120,21 @@ function formatHm(date: Date): string {
   const hh = date.getUTCHours().toString().padStart(2, '0');
   const mm = date.getUTCMinutes().toString().padStart(2, '0');
   return `${hh}:${mm}`;
+}
+
+function splitNotificationType(raw?: string | null): {
+  type: string;
+  tripId?: string;
+} {
+  const value = (raw ?? '').trim();
+  const marker = '::';
+  const index = value.indexOf(marker);
+  if (index < 0) return { type: value };
+  const tripId = value.slice(index + marker.length).trim();
+  return {
+    type: value.slice(0, index),
+    ...(tripId ? { tripId } : {}),
+  };
 }
 
 function formatDateLabel(date: Date): string {

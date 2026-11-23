@@ -33,6 +33,35 @@ export class SendOtpRequest {
   platform?: string;
 }
 
+export class ResetPasswordRequest {
+  @IsNotEmpty()
+  phone!: string;
+
+  @IsNotEmpty()
+  @IsString()
+  @MinLength(8)
+  @MaxLength(72)
+  newPassword!: string;
+
+  @IsOptional()
+  @ValidateIf((_, value) => value != null && value !== '')
+  @Length(6, 6)
+  @Matches(/^\d{6}$/, { message: 'رمز التحقق يجب أن يكون 6 أرقام' })
+  code?: string;
+
+  @IsOptional()
+  @IsString()
+  firebaseIdToken?: string;
+
+  @IsOptional()
+  @IsString()
+  platform?: string;
+
+  @IsOptional()
+  @IsString()
+  deviceId?: string;
+}
+
 export class VerifyOtpRequest {
   @IsNotEmpty()
   phone!: string;

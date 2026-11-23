@@ -19,6 +19,7 @@ import {
   platformCut,
 } from '../../common/utils/money';
 import { toDataUrlStoragePath } from '../../common/utils/document-storage';
+import { countsAsCaptainCash } from '../subscriptions/package-ride.policy';
 
 export const PLATFORM_INSTAPAY_PHONE = '01024139097';
 
@@ -164,6 +165,8 @@ export class CaptainPaymentsService {
       paidAmount: ledger.paidAmount,
       pendingAmount: ledger.pendingAmount,
       payableAmount: ledger.payableAmount,
+      packageFundedFare: ledger.packageFundedFare,
+      packageSettlement: ledger.packageSettlement,
       commissionPercent: DEFAULT_PLATFORM_COMMISSION_PERCENT,
       instapayPhone: PLATFORM_INSTAPAY_PHONE,
       payments: payments.map((row) => this.mapPayment(row)),
@@ -216,7 +219,13 @@ export class CaptainPaymentsService {
         select: {
           bookings: {
             where: { isDeleted: false, status: BookingStatus.Confirmed },
-            select: { totalAmount: true, pricePerSeat: true, seatCount: true },
+            select: {
+              totalAmount: true,
+              pricePerSeat: true,
+              seatCount: true,
+              paymentMethod: true,
+              usesSubscriptionCredit: true,
+            },
           },
         },
       }),
@@ -227,6 +236,7 @@ export class CaptainPaymentsService {
     ]);
 
     let grossTotal = 0;
+    let packageFundedFare = 0;
     const add = (total: number) => {
       if (total > 0) grossTotal = normalizeMoney(grossTotal + total);
     };
@@ -238,6 +248,10 @@ export class CaptainPaymentsService {
           money(booking.totalAmount) > 0
             ? money(booking.totalAmount)
             : money(booking.pricePerSeat) * booking.seatCount;
+        if (!countsAsCaptainCash(booking.paymentMethod, booking.usesSubscriptionCredit)) {
+          packageFundedFare = normalizeMoney(packageFundedFare + row);
+          return sum;
+        }
         return sum + row;
       }, 0);
       add(total);
@@ -264,6 +278,8 @@ export class CaptainPaymentsService {
       paidAmount,
       pendingAmount,
       payableAmount,
+      packageFundedFare,
+      packageSettlement: 'excluded_from_captain_cash',
     };
   }
 

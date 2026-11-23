@@ -1,4 +1,9 @@
-import { MATCH_RADIUS_METERS, matchOriginDestination, type OrderedStop } from './segment-occupancy';
+import {
+  MATCH_RADIUS_METERS,
+  PREVIEW_MATCH_RADIUS_METERS,
+  matchOriginDestination,
+  type OrderedStop,
+} from './segment-occupancy';
 import { cairoDateKey } from '../bookings/rider-history-bucket';
 
 export type JourneyQuery = {
@@ -23,16 +28,51 @@ export function normalizePlaceName(raw?: string | null): string {
     .trim();
 }
 
+const LATIN_PLACE_ALIASES: Record<string, string> = {
+  helwan: 'حلوان',
+  shorouk: 'الشروق',
+  'el shorouk': 'الشروق',
+  'al shorouk': 'الشروق',
+  'nasr city': 'مدينه نصر',
+  'madinet nasr': 'مدينه نصر',
+  maadi: 'المعادي',
+  'new cairo': 'القاهره الجديده',
+  rehab: 'الرحاب',
+  mokattam: 'المقطم',
+  heliopolis: 'مصر الجديده',
+  'ain shams': 'عين شمس',
+  shubra: 'شبرا',
+  october: 'اكتوبر',
+  'sheikh zayed': 'الشيخ زايد',
+  obour: 'العبور',
+  'new capital': 'العاصمه الاداريه',
+};
+
+function aliasedPlace(raw?: string | null): string {
+  const key = normalizePlaceName(raw);
+  if (!key) return '';
+  if (LATIN_PLACE_ALIASES[key]) return LATIN_PLACE_ALIASES[key];
+  for (const [latin, arabic] of Object.entries(LATIN_PLACE_ALIASES)) {
+    if (key.includes(latin)) return arabic;
+  }
+  return key;
+}
+
+function namesOverlap(left: string, right: string): boolean {
+  if (left.length < 3 || right.length < 3) return false;
+  if (left === right) return true;
+  const shorter = left.length <= right.length ? left : right;
+  const longer = left.length <= right.length ? right : left;
+  if (shorter.length < 4) return false;
+  return longer.includes(shorter);
+}
+
 /** A stop serves a requested place only when the names actually refer to the same place. */
 export function placesCompatible(requested?: string | null, stopName?: string | null): boolean {
   const wanted = normalizePlaceName(requested);
   const stop = normalizePlaceName(stopName);
-  if (wanted.length < 3 || stop.length < 3) return false;
-  if (wanted === stop) return true;
-  const shorter = wanted.length <= stop.length ? wanted : stop;
-  const longer = wanted.length <= stop.length ? stop : wanted;
-  if (shorter.length < 4) return false;
-  return longer.includes(shorter);
+  if (namesOverlap(wanted, stop)) return true;
+  return namesOverlap(aliasedPlace(requested), aliasedPlace(stopName));
 }
 
 export function hasJourneyCoordinates(query: JourneyQuery): boolean {
@@ -69,14 +109,8 @@ export function matchPreviewStops(
 ): { origin: OrderedStop; destination: OrderedStop } | null {
   const ordered = [...stops].sort((a, b) => a.order - b.order);
   if (hasJourneyCoordinates(query)) {
-    const byCoords = matchOriginDestination(
-      ordered,
-      query.fromLatitude as number,
-      query.fromLongitude as number,
-      query.toLatitude as number,
-      query.toLongitude as number,
-      MATCH_RADIUS_METERS,
-    );
+    const byCoords = matchStopsByRadius(ordered, query, MATCH_RADIUS_METERS)
+      ?? matchStopsByRadius(ordered, query, PREVIEW_MATCH_RADIUS_METERS);
     if (byCoords) return byCoords;
   }
   return matchRouteToJourney(ordered, {
@@ -92,14 +126,8 @@ export function matchRouteToJourney(
   const ordered = [...stops].sort((a, b) => a.order - b.order);
   if (ordered.length < 2) return null;
   if (hasJourneyCoordinates(query)) {
-    return matchOriginDestination(
-      ordered,
-      query.fromLatitude as number,
-      query.fromLongitude as number,
-      query.toLatitude as number,
-      query.toLongitude as number,
-      MATCH_RADIUS_METERS,
-    );
+    return matchStopsByRadius(ordered, query, MATCH_RADIUS_METERS)
+      ?? matchStopsByRadius(ordered, query, PREVIEW_MATCH_RADIUS_METERS);
   }
   const from = normalizePlaceName(query.fromAddress);
   const to = normalizePlaceName(query.toAddress);
@@ -111,6 +139,21 @@ export function matchRouteToJourney(
   );
   if (!destination) return null;
   return { origin, destination };
+}
+
+function matchStopsByRadius(
+  stops: OrderedStop[],
+  query: JourneyQuery,
+  radiusMeters: number,
+) {
+  return matchOriginDestination(
+    stops,
+    query.fromLatitude as number,
+    query.fromLongitude as number,
+    query.toLatitude as number,
+    query.toLongitude as number,
+    radiusMeters,
+  );
 }
 
 export function instancesOnDate<T extends { scheduledAt: Date }>(

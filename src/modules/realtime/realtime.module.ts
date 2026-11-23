@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { PackagePaymentGateway } from './package-payment.gateway';
 import {
   DriverGateway,
   GroupGateway,
@@ -20,6 +21,7 @@ import { TripLiveController } from './trip-live.controller';
     DriverGateway,
     GroupGateway,
     RiderHistoryGateway,
+    PackagePaymentGateway,
   ],
   exports: [
     SupportChatGateway,
@@ -28,6 +30,7 @@ import { TripLiveController } from './trip-live.controller';
     DriverGateway,
     RideTrackingGateway,
     TripTrackingGateway,
+    PackagePaymentGateway,
   ],
 })
 export class RealtimeModule {}

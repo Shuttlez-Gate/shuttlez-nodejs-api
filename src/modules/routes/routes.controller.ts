@@ -6,7 +6,11 @@ import { ErrorCodes } from '../../common/error-codes';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { splitRouteName } from '../landing/landing.service';
 import { CaptainRoutesService } from '../marketplace/captain-routes.service';
-import { RouteOwnerType, RoutePublishStatus } from '../../common/enums';
+import {
+  RouteOwnerType,
+  RoutePublishStatus,
+  TripStatus,
+} from '../../common/enums';
 
 const badgePalette = [
   [uncheckedInt(0xff95feb3), uncheckedInt(0xff42ff78)],
@@ -32,21 +36,40 @@ export class RoutesController {
         publishStatus: RoutePublishStatus.Published,
       },
       orderBy: { name: 'asc' },
-      include: { stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } } },
+      include: {
+        stops: { where: { isDeleted: false }, orderBy: { order: 'asc' } },
+        trips: {
+          where: {
+            isDeleted: false,
+            driverId: { not: null },
+            status: {
+              in: [
+                TripStatus.Scheduled,
+                TripStatus.DriverAssigned,
+                TripStatus.InProgress,
+              ],
+            },
+          },
+          orderBy: { scheduledAt: 'asc' },
+          take: 1,
+          select: { driver: { select: { plateNumber: true } } },
+        },
+      },
     });
     return ApiResponse.ok(
       routes.map((route, i) => {
         const { from, to } = splitRouteName(route.name);
         const palette = badgePalette[i % badgePalette.length];
         const firstStop = route.stops[0];
+        const plate = route.trips[0]?.driver?.plateNumber?.trim() ?? '';
         return {
           id: route.id,
           from,
           to,
           stopsCount: route.stops.length,
-          nearestStop: 'أقرب نقطة التقاء - 10دق',
+          nearestStop: '',
           nearestStreet: firstStop?.name ?? route.description ?? from,
-          busPlate: 'B-YT-5904',
+          busPlate: plate,
           badgeColorStart: palette[0],
           badgeColorEnd: palette[1],
         };

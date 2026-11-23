@@ -21,13 +21,14 @@ export class PushNotificationService {
     type: string,
     data: Record<string, string> = {},
   ): Promise<void> {
+    const tripId = (data.tripId ?? '').trim();
     await this.prisma.notification.create({
       data: {
         id: newId(),
         userId,
         title,
         body,
-        type,
+        type: tripId ? `${type}::${tripId}` : type,
         isRead: false,
         ...baseFields(),
       },

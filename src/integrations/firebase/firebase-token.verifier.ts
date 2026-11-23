@@ -55,13 +55,12 @@ export class FirebaseTokenVerifier {
       const admin = await loadFirebaseAdmin();
       const decoded = await admin.auth(app as never).verifyIdToken(firebaseIdToken);
       const firebaseClaim = decoded.firebase as
-        | { sign_in_provider?: string }
+        | {
+            sign_in_provider?: string;
+            identities?: Record<string, unknown>;
+          }
         | undefined;
-      const signInProvider = firebaseClaim?.sign_in_provider;
-      if (
-        !signInProvider ||
-        signInProvider.toLowerCase() !== normalizedProvider.toLowerCase()
-      ) {
+      if (!firebaseTokenMatchesProvider(normalizedProvider, firebaseClaim)) {
         throw new UnauthorizedAppException(
           'نوع مزود تسجيل الدخول لا يطابق الرمز المرسل',
           'FIREBASE_PROVIDER_MISMATCH',
@@ -244,4 +243,28 @@ export class FirebaseTokenVerifier {
   }
 
 
+}
+
+const firebaseSignInProviders: Record<string, string> = {
+  google: 'google.com',
+  facebook: 'facebook.com',
+};
+
+function firebaseTokenMatchesProvider(
+  requested: string,
+  claim:
+    | {
+        sign_in_provider?: string;
+        identities?: Record<string, unknown>;
+      }
+    | undefined,
+): boolean {
+  const expected = firebaseSignInProviders[requested];
+  if (!expected) return false;
+  const actual = claim?.sign_in_provider?.trim().toLowerCase();
+  if (actual === expected) return true;
+  const identities = claim?.identities;
+  return Boolean(
+    identities && Object.prototype.hasOwnProperty.call(identities, expected),
+  );
 }

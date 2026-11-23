@@ -67,6 +67,8 @@ import {
 import { PlacesController } from '../places/places.controller';
 import { PlacesService } from '../places/places.service';
 import { RealtimeModule } from '../realtime/realtime.module';
+import { PackageRideService } from '../subscriptions/package-ride.service';
+import { RiderReviewsController } from '../subscriptions/rider-reviews.controller';
 
 @Module({
   imports: [AuthModule, LandingModule, RealtimeModule],
@@ -82,6 +84,7 @@ import { RealtimeModule } from '../realtime/realtime.module';
     BookingsController,
     TripsController,
     SubscriptionPackagesController,
+    RiderReviewsController,
     SupportController,
     RouteRequestsController,
     PlacesController,
@@ -125,6 +128,7 @@ import { RealtimeModule } from '../realtime/realtime.module';
     CorridorDemandService,
     AdminDashboardService,
     PlacesService,
+    PackageRideService,
   ],
 })
 export class CoreApiModule {}
