@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { CurrentUserService } from '../../common/current-user.service';
@@ -54,6 +54,7 @@ import {
   RideTrackingGateway,
   TripTrackingGateway,
 } from '../realtime/realtime.gateway';
+import { RideOutboxService } from '../realtime/ride-outbox.service';
 import { GroupsService } from '../groups/groups.service';
 import {
   publishRiderHistoryChange,
@@ -74,6 +75,7 @@ export class DriversService {
     private readonly rideTrackingGateway?: RideTrackingGateway,
     private readonly tripTracking?: TripTrackingGateway,
     private readonly packages?: PackageRideService,
+    @Optional() private readonly rideOutbox?: RideOutboxService,
   ) {}
 
   async me() {
@@ -732,6 +734,7 @@ export class DriversService {
         driverId: null,
         isDeleted: false,
         createdAt: { gte: cutoff },
+        offerDecisions: { none: { driverId: driver.id, decision: 'rejected' } },
       },
       include: {
         rider: true,
@@ -826,24 +829,55 @@ export class DriversService {
     }
 
     await this.assertCanClaimRide(driver, ride);
-    const claimed = await this.prisma.rideRequest.updateMany({
-      where: {
-        id: ride.id,
-        isDeleted: false,
-        status: RideRequestStatus.Requested,
-        OR: [{ driverId: null }, { driverId: driver.id }],
-      },
-      data: {
-        driverId: driver.id,
-        status: RideRequestStatus.Assigned,
-        assignedAt: utcNow(),
-        updatedAt: utcNow(),
-      },
+    const transition = await this.prisma.$transaction(async (tx) => {
+      const claimed = await tx.rideRequest.updateMany({
+        where: {
+          id: ride.id,
+          isDeleted: false,
+          status: RideRequestStatus.Requested,
+          OR: [{ driverId: null }, { driverId: driver.id }],
+        },
+        data: {
+          driverId: driver.id,
+          status: RideRequestStatus.Assigned,
+          assignedAt: utcNow(),
+          driverArrivedAt: null,
+          updatedAt: utcNow(),
+        },
+      });
+      if (claimed.count === 1) {
+        const rejectedOffer = await tx.rideOfferDecision.findUnique({
+          where: { rideId_driverId: { rideId: ride.id, driverId: driver.id } },
+        });
+        if (rejectedOffer) {
+          throw new AppException('This driver already rejected this offer', 400, ErrorCodes.RideNotAssignable);
+        }
+      }
+      const updated = await tx.rideRequest.findFirst({
+        where: { id: ride.id, isDeleted: false },
+        include: { driver: { include: { user: true, vehicle: true } } },
+      });
+      if (claimed.count === 1 && updated && this.rideOutbox) {
+        const presence = this.driverGateway?.getDriverPresence(driver.userId);
+        const mappedRide = {
+          ...this.rides.mapRide(updated, updated.requestedVehicleKind),
+          ...(presence
+            ? {
+                captainLatitude: presence.latitude,
+                captainLongitude: presence.longitude,
+                captainLocationUpdatedAt: new Date(presence.updatedAt).toISOString(),
+              }
+            : {}),
+        };
+        await this.rideOutbox.enqueue(tx, {
+          eventType: 'ride.accepted',
+          aggregateId: updated.id,
+          payload: { acceptedByUserId: driver.userId, mappedRide },
+        });
+      }
+      return { claimed, updated };
     });
-    const updated = await this.prisma.rideRequest.findFirst({
-      where: { id: ride.id, isDeleted: false },
-      include: { driver: { include: { user: true, vehicle: true } } },
-    });
+    const { claimed, updated } = transition;
     if (!updated) {
       throw new NotFoundException('المشوار غير موجود', ErrorCodes.RideNotFound);
     }
@@ -860,7 +894,8 @@ export class DriversService {
       throw new AppException('تم قبول هذا المشوار من قبل كابتن آخر', 400, ErrorCodes.RideNotAssignable);
     }
 
-    this.driverGateway?.notifyClaimed(updated.id, driver.userId);
+    if (claimed.count === 1 && this.rideOutbox) this.rideOutbox.wake();
+    else if (claimed.count === 1) this.driverGateway?.notifyClaimed(updated.id, driver.userId);
     publishRiderHistoryChange({
       userId: updated.riderUserId,
       product: 'ride',
@@ -877,19 +912,51 @@ export class DriversService {
           }
         : {}),
     };
-    this.rideTrackingGateway?.publishRideAccepted(mappedRide);
+    if (!this.rideOutbox && claimed.count === 1) this.rideTrackingGateway?.publishRideAccepted(mappedRide);
     return this.acceptedRideResult(driver, updated, false, mappedRide);
   }
 
   async rejectRide(rideId: string) {
-    await this.requireDriver();
+    const driver = await this.requireDriver();
+    const result = await this.prisma.$transaction(async (tx) => {
+      const where = { rideId_driverId: { rideId, driverId: driver.id } };
+      const existing = await tx.rideOfferDecision.findUnique({ where });
+      if (existing) return { idempotent: true };
+
+      const claim = await tx.rideRequest.updateMany({
+        where: {
+          id: rideId,
+          isDeleted: false,
+          status: RideRequestStatus.Requested,
+          driverId: null,
+        },
+        data: { updatedAt: utcNow() },
+      });
+      if (claim.count !== 1) {
+        const current = await tx.rideRequest.findFirst({ where: { id: rideId, isDeleted: false } });
+        if (!current) throw new NotFoundException('Ride not found', ErrorCodes.RideNotFound);
+        throw new AppException('Ride offer is no longer available', 400, ErrorCodes.RideNotAssignable);
+      }
+
+      const inserted = await tx.rideOfferDecision.createMany({
+        data: [{
+          id: newId(),
+          rideId,
+          driverId: driver.id,
+          decision: 'rejected',
+          decidedAt: utcNow(),
+        }],
+        skipDuplicates: true,
+      });
+      return { idempotent: inserted.count === 0 };
+    });
     return {
       rideId,
       rejected: true,
-      message: 'تم تخطي المشوار',
+      idempotent: result.idempotent,
+      message: 'Offer rejected',
     };
   }
-
   async startRide(rideId: string) {
     return this.transitionRide(rideId, true);
   }
@@ -950,12 +1017,84 @@ export class DriversService {
     if (!ride) {
       throw new NotFoundException('المشوار غير موجود', ErrorCodes.RideNotFound);
     }
-    const amount = money(ride.totalAmount) || money(ride.fareAmount);
-    this.rideTrackingGateway?.publishFareCollected(ride.id, amount, ride.riderUserId);
+    const priorCollection = await this.prisma.rideCashCollection.findUnique({ where: { rideId } });
+    if (priorCollection) {
+      if (priorCollection.driverId !== driver.id) {
+        throw new AppException('Cash collection belongs to another assigned driver', 403, ErrorCodes.RideNotAssigned);
+      }
+      return {
+        rideId,
+        fareAmount: money(priorCollection.amount),
+        collected: true,
+        collectionId: priorCollection.id,
+        currency: priorCollection.currency,
+        collectedAt: priorCollection.collectedAt,
+        idempotent: true,
+      };
+    }
+    if (ride.status !== RideRequestStatus.InProgress && ride.status !== RideRequestStatus.Completed) {
+      throw new AppException('Cash can only be collected during or after an active ride', 400, ErrorCodes.RideNotCompletable);
+    }
+    if (ride.paymentMethod.trim().toLowerCase() !== 'cash') {
+      throw new AppException('This ride is not payable in cash', 400, ErrorCodes.RideNotCompletable);
+    }
+    let collection: NonNullable<Awaited<ReturnType<PrismaService['rideCashCollection']['findUnique']>>>;
+    let idempotent = false;
+    try {
+      collection = await this.prisma.$transaction(async (tx) => {
+        const current = await tx.rideRequest.findFirst({
+          where: { id: rideId, driverId: driver.id, isDeleted: false },
+        });
+        if (!current) throw new AppException('Ride is unavailable for collection', 404, ErrorCodes.RideNotFound);
+        const existing = await tx.rideCashCollection.findUnique({ where: { rideId } });
+        if (existing) {
+          if (existing.driverId !== driver.id) throw new AppException('Cash collection belongs to another driver', 403, ErrorCodes.RideNotAssigned);
+          idempotent = true;
+          return existing;
+        }
+        if (current.status !== RideRequestStatus.InProgress && current.status !== RideRequestStatus.Completed) {
+          throw new AppException('Cash can only be collected during or after an active ride', 400, ErrorCodes.RideNotCompletable);
+        }
+        if (current.paymentMethod.trim().toLowerCase() !== 'cash') {
+          throw new AppException('This ride is not payable in cash', 400, ErrorCodes.RideNotCompletable);
+        }
+        const collectedAt = utcNow();
+        const amountValue = money(current.totalAmount) || money(current.fareAmount);
+        const created = await tx.rideCashCollection.create({
+          data: {
+            id: newId(),
+            rideId,
+            driverId: driver.id,
+            amount: new Prisma.Decimal(amountValue),
+            currency: 'EGP',
+            collectedAt,
+          },
+        });
+        await this.rideOutbox?.enqueue(tx, {
+          eventType: 'ride.cash_collected',
+          aggregateId: rideId,
+          payload: { amount: amountValue, currency: created.currency, riderUserId: current.riderUserId },
+        });
+        return created;
+      });
+    } catch (error) {
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error;
+      const existing = await this.prisma.rideCashCollection.findUnique({ where: { rideId } });
+      if (!existing || existing.driverId !== driver.id) throw error;
+      collection = existing;
+      idempotent = true;
+    }
+    const amount = money(collection.amount);
+    if (this.rideOutbox && !idempotent) this.rideOutbox.wake();
+    else if (!idempotent) this.rideTrackingGateway?.publishFareCollected(ride.id, amount, ride.riderUserId);
     return {
       rideId: ride.id,
       fareAmount: amount,
       collected: true,
+      collectionId: collection.id,
+      currency: collection.currency,
+      collectedAt: collection.collectedAt,
+      idempotent,
     };
   }
 
@@ -1008,10 +1147,23 @@ export class DriversService {
       if (trip.status !== TripStatus.Scheduled && trip.status !== TripStatus.DriverAssigned) {
         throw new AppException('لا يمكن بدء الرحلة', 400, ErrorCodes.TripNotStartable);
       }
-      const updated = await this.prisma.trip.update({
-        where: { id: trip.id },
+      const transitioned = await this.prisma.trip.updateMany({
+        where: {
+          id: trip.id,
+          driverId: driver.id,
+          isDeleted: false,
+          status: trip.status,
+        },
         data: { status: TripStatus.InProgress, startedAt: utcNow(), updatedAt: utcNow() },
       });
+      if (transitioned.count !== 1) {
+        const current = await this.prisma.trip.findFirst({ where: { id: trip.id, isDeleted: false } });
+        if (current?.status === TripStatus.InProgress) {
+          return lifecycle('trip', current.id, driver.id, current.status, current.startedAt, current.completedAt, 'Trip started', true);
+        }
+        throw new AppException('Trip cannot start', 400, ErrorCodes.TripNotStartable);
+      }
+      const updated = await this.prisma.trip.findFirstOrThrow({ where: { id: trip.id } });
       const riders = await this.prisma.booking.findMany({
         where: { tripId: updated.id, isDeleted: false, status: { not: BookingStatus.Cancelled } },
         select: { userId: true },
@@ -1030,11 +1182,23 @@ export class DriversService {
     if (trip.status !== TripStatus.InProgress) {
       throw new AppException('لا يمكن إنهاء الرحلة', 400, ErrorCodes.TripNotCompletable);
     }
-    const updated = await this.prisma.trip.update({
-      where: { id: trip.id },
-      data: { status: TripStatus.Completed, completedAt: utcNow(), updatedAt: utcNow() },
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const transitioned = await tx.trip.updateMany({
+        where: { id: trip.id, driverId: driver.id, isDeleted: false, status: TripStatus.InProgress },
+        data: { status: TripStatus.Completed, completedAt: utcNow(), updatedAt: utcNow() },
+      });
+      if (transitioned.count !== 1) return null;
+      const committedTrip = await tx.trip.findFirstOrThrow({ where: { id: trip.id } });
+      await this.packages?.finalizeTrip(committedTrip.id, tx);
+      return committedTrip;
     });
-    await this.packages?.finalizeTrip(updated.id);
+    if (!updated) {
+      const current = await this.prisma.trip.findFirst({ where: { id: trip.id, isDeleted: false } });
+      if (current?.status === TripStatus.Completed) {
+        return lifecycle('trip', current.id, driver.id, current.status, current.startedAt, current.completedAt, 'Trip completed', true);
+      }
+      throw new AppException('Trip cannot complete', 400, ErrorCodes.TripNotCompletable);
+    }
     await publishTripRiders(this.prisma, updated.id);
     return lifecycle('trip', updated.id, driver.id, updated.status, updated.startedAt, updated.completedAt, 'تم إنهاء الرحلة');
   }
@@ -1063,16 +1227,52 @@ export class DriversService {
       if (ride.status !== RideRequestStatus.Assigned) {
         throw new AppException('لا يمكن بدء المشوار', 400, ErrorCodes.RideNotStartable);
       }
-      const updated = await this.prisma.rideRequest.update({
-        where: { id: ride.id },
-        data: { status: RideRequestStatus.InProgress, startedAt: utcNow(), updatedAt: utcNow() },
+      const startedAt = utcNow();
+      const transitioned = await this.prisma.$transaction(async (tx) => {
+        const result = await tx.rideRequest.updateMany({
+          where: {
+            id: ride.id,
+            driverId: driver.id,
+            isDeleted: false,
+            status: RideRequestStatus.Assigned,
+          },
+          data: { status: RideRequestStatus.InProgress, startedAt, updatedAt: startedAt },
+        });
+        if (result.count === 1 && this.rideOutbox) {
+          await this.rideOutbox.enqueue(tx, {
+            eventType: 'ride.started',
+            aggregateId: ride.id,
+            payload: { startedAt: startedAt.toISOString(), riderUserId: ride.riderUserId },
+          });
+        }
+        return result;
       });
-      this.rideTrackingGateway?.publishRideStarted(
-        updated.id,
-        updated.startedAt,
-        updated.riderUserId,
-      );
-      this.tripTracking?.publishTripStarted(updated.id, [updated.riderUserId]);
+      if (transitioned.count !== 1) {
+        const current = await this.prisma.rideRequest.findFirst({ where: { id: ride.id, isDeleted: false } });
+        if (current?.driverId === driver.id && current.status === RideRequestStatus.InProgress) {
+          return {
+            rideId: current.id,
+            driverId: driver.id,
+            status: rideStatusLabel(current.status),
+            startedAt: current.startedAt,
+            completedAt: current.completedAt,
+            updatedAt: current.updatedAt,
+            message: 'Ride started',
+            idempotent: true,
+          };
+        }
+        throw new AppException('Ride cannot start', 400, ErrorCodes.RideNotStartable);
+      }
+      const updated = await this.prisma.rideRequest.findFirstOrThrow({ where: { id: ride.id } });
+      if (this.rideOutbox) this.rideOutbox.wake();
+      else {
+        this.rideTrackingGateway?.publishRideStarted(
+          updated.id,
+          updated.startedAt,
+          updated.riderUserId,
+        );
+        this.tripTracking?.publishTripStarted(updated.id, [updated.riderUserId]);
+      }
       publishRiderHistoryChange({
         userId: updated.riderUserId,
         product: 'ride',
@@ -1102,22 +1302,62 @@ export class DriversService {
       };
     }
     if (
-      ride.status !== RideRequestStatus.InProgress &&
-      ride.status !== RideRequestStatus.Assigned
+      ride.status !== RideRequestStatus.InProgress
     ) {
       throw new AppException('لا يمكن إنهاء المشوار', 400, ErrorCodes.RideNotCompletable);
     }
-    const updated = await this.prisma.rideRequest.update({
-      where: { id: ride.id },
-      data: { status: RideRequestStatus.Completed, completedAt: utcNow(), updatedAt: utcNow() },
+    const completedAt = utcNow();
+    const transitioned = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.rideRequest.updateMany({
+        where: {
+          id: ride.id,
+          driverId: driver.id,
+          isDeleted: false,
+          status: RideRequestStatus.InProgress,
+        },
+        data: { status: RideRequestStatus.Completed, completedAt, updatedAt: completedAt },
+      });
+      if (result.count === 1 && this.rideOutbox) {
+        await this.rideOutbox.enqueue(tx, {
+          eventType: 'ride.completed',
+          aggregateId: ride.id,
+          payload: {
+            completedAt: completedAt.toISOString(),
+            fareAmount: money(ride.totalAmount) || money(ride.fareAmount),
+            distanceKm: ride.distanceKm == null ? undefined : Number(ride.distanceKm),
+            riderUserId: ride.riderUserId,
+          },
+        });
+      }
+      return result;
     });
-    this.rideTrackingGateway?.publishRideCompleted(
-      updated.id,
-      updated.completedAt,
-      money(updated.totalAmount) || money(updated.fareAmount),
-      updated.distanceKm ? Number(updated.distanceKm) : undefined,
-      updated.riderUserId,
-    );
+    if (transitioned.count !== 1) {
+      const current = await this.prisma.rideRequest.findFirst({ where: { id: ride.id, isDeleted: false } });
+      if (current?.driverId === driver.id && current.status === RideRequestStatus.Completed) {
+        return {
+          rideId: current.id,
+          driverId: driver.id,
+          status: rideStatusLabel(current.status),
+          startedAt: current.startedAt,
+          completedAt: current.completedAt,
+          updatedAt: current.updatedAt,
+          message: 'Ride completed',
+          idempotent: true,
+        };
+      }
+      throw new AppException('Ride cannot complete', 400, ErrorCodes.RideNotCompletable);
+    }
+    const updated = await this.prisma.rideRequest.findFirstOrThrow({ where: { id: ride.id } });
+    if (this.rideOutbox) this.rideOutbox.wake();
+    else {
+      this.rideTrackingGateway?.publishRideCompleted(
+        updated.id,
+        updated.completedAt,
+        money(updated.totalAmount) || money(updated.fareAmount),
+        updated.distanceKm ? Number(updated.distanceKm) : undefined,
+        updated.riderUserId,
+      );
+    }
     publishRiderHistoryChange({
       userId: updated.riderUserId,
       product: 'ride',
@@ -1231,14 +1471,43 @@ export class DriversService {
     if (ride.status !== RideRequestStatus.Assigned) {
       throw new AppException('لا يمكن تأكيد الوصول إلا بعد قبول المشوار وقبل بدئه', 400);
     }
-    await this.prisma.rideRequest.update({
-      where: { id: ride.id },
-      data: { updatedAt: utcNow() },
+    if (ride.driverArrivedAt) {
+      return { rideId: ride.id, arrived: true, idempotent: true, message: 'Driver already confirmed arrival' };
+    }
+    const arrivedAt = utcNow();
+    const confirmed = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.rideRequest.updateMany({
+        where: {
+          id: ride.id,
+          driverId: driver.id,
+          isDeleted: false,
+          status: RideRequestStatus.Assigned,
+          driverArrivedAt: null,
+        },
+        data: { driverArrivedAt: arrivedAt, updatedAt: arrivedAt },
+      });
+      if (result.count === 1 && this.rideOutbox) {
+        await this.rideOutbox.enqueue(tx, {
+          eventType: 'ride.arrived',
+          aggregateId: ride.id,
+          payload: { riderUserId: ride.riderUserId, arrivedAt: arrivedAt.toISOString() },
+        });
+      }
+      return result;
     });
-    this.rideTrackingGateway?.publishArrivalConfirmed(ride.id);
+    if (confirmed.count !== 1) {
+      const current = await this.prisma.rideRequest.findFirst({ where: { id: ride.id, isDeleted: false } });
+      if (current?.driverId === driver.id && current.status === RideRequestStatus.Assigned && current.driverArrivedAt) {
+        return { rideId: ride.id, arrived: true, idempotent: true, message: 'Driver already confirmed arrival' };
+      }
+      throw new AppException('Ride state changed; retry the operation', 400, ErrorCodes.RideNotStartable);
+    }
+    if (this.rideOutbox) this.rideOutbox.wake();
+    else this.rideTrackingGateway?.publishArrivalConfirmed(ride.id, ride.riderUserId);
     return {
       rideId: ride.id,
       arrived: true,
+      idempotent: false,
       message: 'تم تأكيد الوصول لنقطة الركوب بنجاح',
     };
   }
@@ -1258,18 +1527,29 @@ export class DriversService {
       throw new AppException('لا يمكن إلغاء مشوار مكتمل', 400);
     }
     if (ride.status === RideRequestStatus.InProgress) {
-      const stopped = await this.prisma.rideRequest.updateMany({
-        where: {
-          id: ride.id,
-          driverId: driver.id,
-          isDeleted: false,
-          status: RideRequestStatus.InProgress,
-        },
-        data: {
-          status: RideRequestStatus.Cancelled,
-          cancelledAt: utcNow(),
-          updatedAt: utcNow(),
-        },
+      const cancelledAt = utcNow();
+      const stopped = await this.prisma.$transaction(async (tx) => {
+        const result = await tx.rideRequest.updateMany({
+          where: {
+            id: ride.id,
+            driverId: driver.id,
+            isDeleted: false,
+            status: RideRequestStatus.InProgress,
+          },
+          data: {
+            status: RideRequestStatus.Cancelled,
+            cancelledAt,
+            updatedAt: cancelledAt,
+          },
+        });
+        if (result.count === 1 && this.rideOutbox) {
+          await this.rideOutbox.enqueue(tx, {
+            eventType: 'ride.cancelled',
+            aggregateId: ride.id,
+            payload: { cancelledBy: 'driver', reason: reason ?? null, cancelledAt: cancelledAt.toISOString() },
+          });
+        }
+        return result;
       });
       if (stopped.count !== 1) {
         const again = await this.prisma.rideRequest.findFirst({
@@ -1280,7 +1560,8 @@ export class DriversService {
         }
         throw new AppException('تعذر إلغاء المشوار', 400);
       }
-      this.rideTrackingGateway?.publishRideCancelled(ride.id, 'driver', reason);
+      if (this.rideOutbox) this.rideOutbox.wake();
+      else this.rideTrackingGateway?.publishRideCancelled(ride.id, 'driver', reason);
       this.driverGateway?.releaseActiveRide(driver.userId);
       publishRiderHistoryChange({
         userId: ride.riderUserId,
@@ -1289,22 +1570,42 @@ export class DriversService {
       });
       return { rideId: ride.id, cancelled: true, message: 'تم إلغاء المشوار' };
     }
-    const released = await this.prisma.rideRequest.updateMany({
-      where: {
-        id: ride.id,
-        driverId: driver.id,
-        isDeleted: false,
-        status: RideRequestStatus.Assigned,
-      },
-      data: {
-        driverId: null,
-        status: RideRequestStatus.Requested,
-        assignedAt: null,
-        updatedAt: utcNow(),
-      },
+    const releasedAt = utcNow();
+    const released = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.rideRequest.updateMany({
+        where: {
+          id: ride.id,
+          driverId: driver.id,
+          isDeleted: false,
+          status: RideRequestStatus.Assigned,
+        },
+        data: {
+          driverId: null,
+          status: RideRequestStatus.Requested,
+          assignedAt: null,
+          driverArrivedAt: null,
+          updatedAt: releasedAt,
+        },
+      });
+      if (result.count === 1 && this.rideOutbox) {
+        await this.rideOutbox.enqueue(tx, {
+          eventType: 'ride.driver_released',
+          aggregateId: ride.id,
+          payload: { reason: reason ?? null },
+        });
+      }
+      return result;
     });
     if (released.count !== 1) {
       throw new AppException('لا يمكن إلغاء المشوار بعد بدئه، يمكن طلب إنهاء مبكر فقط', 400);
+    }
+    if (this.rideOutbox) {
+      this.rideOutbox.wake();
+      return {
+        rideId: ride.id,
+        cancelled: true,
+        message: 'Driver released ride for redispatch',
+      };
     }
     this.rideTrackingGateway?.publishRideCancelled(ride.id, 'driver', reason);
     if (ride.pickupLatitude != null && ride.pickupLongitude != null) {
@@ -1381,22 +1682,46 @@ export class DriversService {
       return { rideId, requested: true, message: 'تم إرسال طلب الإنهاء المبكر' };
     }
     if (action === 'accept') {
-      const updated = await this.prisma.rideRequest.update({
-        where: { id: ride.id },
-        data: {
-          status: RideRequestStatus.Completed,
-          completedAt: utcNow(),
-          updatedAt: utcNow(),
-        },
+      const completedAt = utcNow();
+      const completed = await this.prisma.$transaction(async (tx) => {
+        const result = await tx.rideRequest.updateMany({
+          where: {
+            id: ride.id,
+            driverId: driver.id,
+            isDeleted: false,
+            status: RideRequestStatus.InProgress,
+          },
+          data: { status: RideRequestStatus.Completed, completedAt, updatedAt: completedAt },
+        });
+        if (result.count === 1 && this.rideOutbox) {
+          await this.rideOutbox.enqueue(tx, {
+            eventType: 'ride.early_completed',
+            aggregateId: ride.id,
+            payload: {
+              completedAt: completedAt.toISOString(),
+              fareAmount: money(ride.totalAmount) || money(ride.fareAmount),
+              distanceKm: ride.distanceKm == null ? null : Number(ride.distanceKm),
+              riderUserId: ride.riderUserId,
+            },
+          });
+        }
+        return result;
       });
-      this.rideTrackingGateway?.publishTerminationResolved(rideId, true);
-      this.rideTrackingGateway?.publishRideCompleted(
-        updated.id,
-        updated.completedAt,
-        money(updated.totalAmount) || money(updated.fareAmount),
-        updated.distanceKm ? Number(updated.distanceKm) : undefined,
-        updated.riderUserId,
-      );
+      if (completed.count !== 1) {
+        throw new AppException('Ride state changed; retry the operation', 400, ErrorCodes.RideNotCompletable);
+      }
+      const updated = await this.prisma.rideRequest.findFirstOrThrow({ where: { id: ride.id } });
+      if (this.rideOutbox) this.rideOutbox.wake();
+      else {
+        this.rideTrackingGateway?.publishTerminationResolved(rideId, true);
+        this.rideTrackingGateway?.publishRideCompleted(
+          updated.id,
+          updated.completedAt,
+          money(updated.totalAmount) || money(updated.fareAmount),
+          updated.distanceKm ? Number(updated.distanceKm) : undefined,
+          updated.riderUserId,
+        );
+      }
       await this.rides.closeAbandonedSearches(updated.riderUserId, updated.id);
       return { rideId, resolved: true, completed: true, message: 'تم قبول الإنهاء المبكر واكتمال المشوار' };
     }

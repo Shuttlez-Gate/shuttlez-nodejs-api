@@ -16,6 +16,7 @@ import { FareService } from '../pricing/fare.service';
 import { PlacesService } from '../places/places.service';
 import { publishRiderHistoryChange } from '../realtime/rider-history-signal';
 import { DriverGateway, RideTrackingGateway } from '../realtime/realtime.gateway';
+import { RideOutboxService } from '../realtime/ride-outbox.service';
 
 @Injectable()
 export class RidesService {
@@ -26,6 +27,7 @@ export class RidesService {
     private readonly driverGateway?: DriverGateway,
     private readonly rideTrackingGateway?: RideTrackingGateway,
     @Optional() private readonly places?: PlacesService,
+    @Optional() private readonly rideOutbox?: RideOutboxService,
   ) {}
 
   async quote(query: {
@@ -300,18 +302,34 @@ export class RidesService {
         ErrorCodes.RideNotCancellable,
       );
     }
-    const cancelled = await this.prisma.rideRequest.updateMany({
-      where: {
-        id: ride.id,
-        riderUserId: userId,
-        isDeleted: false,
-        status: ride.status,
-      },
-      data: {
-        status: RideRequestStatus.Cancelled,
-        cancelledAt: utcNow(),
-        updatedAt: utcNow(),
-      },
+    const cancelledAt = utcNow();
+    const cancelled = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.rideRequest.updateMany({
+        where: {
+          id: ride.id,
+          riderUserId: userId,
+          isDeleted: false,
+          status: ride.status,
+        },
+        data: {
+          status: RideRequestStatus.Cancelled,
+          cancelledAt,
+          updatedAt: cancelledAt,
+        },
+      });
+      if (result.count === 1 && this.rideOutbox) {
+        await this.rideOutbox.enqueue(tx, {
+          eventType: 'ride.cancelled',
+          aggregateId: ride.id,
+          payload: {
+            cancelledBy: 'rider',
+            cancelledAt: cancelledAt.toISOString(),
+            reason: null,
+            assignedDriverUserId: ride.driver?.userId,
+          },
+        });
+      }
+      return result;
     });
     const updated = await this.prisma.rideRequest.findFirst({
       where: { id: ride.id, isDeleted: false },
@@ -337,11 +355,14 @@ export class RidesService {
       id: updated.id,
     });
     const assignedUserId = updated.driver?.userId;
-    this.driverGateway?.broadcastRideWithdrawn(
-      updated.id,
-      assignedUserId ? [assignedUserId] : [],
-    );
-    this.rideTrackingGateway?.publishRideCancelled(updated.id, 'rider');
+    if (this.rideOutbox) this.rideOutbox.wake();
+    else {
+      this.driverGateway?.broadcastRideWithdrawn(
+        updated.id,
+        assignedUserId ? [assignedUserId] : [],
+      );
+      this.rideTrackingGateway?.publishRideCancelled(updated.id, 'rider');
+    }
     const kinds = await this.requestedVehicleKinds([updated.id]);
     return this.mapRide(updated, kinds.get(updated.id) ?? null);
   }
@@ -372,6 +393,7 @@ export class RidesService {
       paymentMethod: ride.paymentMethod,
       isCashConfirmed: ride.isCashConfirmed,
       driverId: ride.driverId,
+      driverArrivedAt: ride.driverArrivedAt,
       driverName: user?.fullName ?? null,
       assignedAt: ride.assignedAt,
       startedAt: ride.startedAt,
@@ -426,21 +448,46 @@ export class RidesService {
       return { rideId, requested: true, message: 'تم إرسال طلب الإنهاء المبكر' };
     }
     if (action === 'accept') {
-      const updated = await this.prisma.rideRequest.update({
-        where: { id: ride.id },
-        data: {
-          status: RideRequestStatus.Completed,
-          completedAt: utcNow(),
-          updatedAt: utcNow(),
-        },
+      const completedAt = utcNow();
+      const completed = await this.prisma.$transaction(async (tx) => {
+        const result = await tx.rideRequest.updateMany({
+          where: {
+            id: ride.id,
+            riderUserId: userId,
+            isDeleted: false,
+            status: RideRequestStatus.InProgress,
+          },
+          data: { status: RideRequestStatus.Completed, completedAt, updatedAt: completedAt },
+        });
+        if (result.count === 1 && this.rideOutbox) {
+          await this.rideOutbox.enqueue(tx, {
+            eventType: 'ride.early_completed',
+            aggregateId: ride.id,
+            payload: {
+              completedAt: completedAt.toISOString(),
+              fareAmount: Number(ride.totalAmount ?? ride.fareAmount),
+              distanceKm: ride.distanceKm == null ? null : Number(ride.distanceKm),
+              riderUserId: ride.riderUserId,
+            },
+          });
+        }
+        return result;
       });
-      this.rideTrackingGateway?.publishTerminationResolved(rideId, true);
-      this.rideTrackingGateway?.publishRideCompleted(
-        updated.id,
-        updated.completedAt,
-        Number(updated.fareAmount),
-        updated.distanceKm ? Number(updated.distanceKm) : undefined,
-      );
+      if (completed.count !== 1) {
+        throw new AppException('O�U,O�O OU,U.O\'U^OO� U.U+ U�O�U,O-O� U�O�', 400, ErrorCodes.RideNotCompletable);
+      }
+      const updated = await this.prisma.rideRequest.findFirstOrThrow({ where: { id: ride.id } });
+      if (this.rideOutbox) this.rideOutbox.wake();
+      else {
+        this.rideTrackingGateway?.publishTerminationResolved(rideId, true);
+        this.rideTrackingGateway?.publishRideCompleted(
+          updated.id,
+          updated.completedAt,
+          Number(updated.fareAmount),
+          updated.distanceKm ? Number(updated.distanceKm) : undefined,
+          updated.riderUserId,
+        );
+      }
       return { rideId, resolved: true, completed: true, message: 'تم قبول الإنهاء المبكر واكتمال المشوار' };
     }
     this.rideTrackingGateway?.publishTerminationResolved(rideId, false);

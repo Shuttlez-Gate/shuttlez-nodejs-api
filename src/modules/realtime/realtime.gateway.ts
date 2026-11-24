@@ -9,6 +9,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
 import { PrismaService } from '../../database/prisma/prisma.service';
+import { newId } from '../../common/utils/date.util';
 import {
   BookingStatus,
   GroupRequestStatus,
@@ -30,6 +31,12 @@ import {
   parseRequestTermination,
   parseResolveTermination,
 } from './socket-payload';
+import type { BroadcastCaptainLocationMessage } from './socket-payload';
+import {
+  RideTrackingAuthorizationService,
+  RIDE_ID_PATTERN,
+  type RideParticipantRole,
+} from './ride-tracking.authorization';
 import type { RidesService } from '../rides/rides.service';
 
 type TripLiveProgress = {
@@ -200,13 +207,14 @@ export class TripTrackingGateway {
     return progress;
   }
 
-  publishTripStarted(tripId: string, riderUserIds: string[]): void {
+  publishTripStarted(tripId: string, riderUserIds: string[], eventId?: string): void {
     const id = tripId.trim().toLowerCase();
     if (!this.server || !id) return;
     const payload = {
       tripId: id,
       status: 'InProgress',
       startedAt: new Date().toISOString(),
+      ...(eventId ? { eventId } : {}),
     };
     let room = this.server.to(`trip-${id}`);
     for (const riderUserId of riderUserIds) {
@@ -840,7 +848,7 @@ export class DriverGateway {
     this.offerAudience.remember(rideId, [userId]);
   }
 
-  broadcastRideWithdrawn(rideId: string, extraUserIds: string[] = []) {
+  broadcastRideWithdrawn(rideId: string, extraUserIds: string[] = [], eventId?: string) {
     if (!this.server || !rideId) return;
     const targets = this.offerAudience.targets(rideId, extraUserIds);
     this.offerAudience.forget(rideId);
@@ -848,6 +856,7 @@ export class DriverGateway {
       rideId,
       status: 'Cancelled',
       cancelledBy: 'rider',
+      ...(eventId ? { eventId } : {}),
     };
     for (const userId of targets) {
       this.server.to(`driver-${userId}`).emit('RideRequestCancelled', payload);
@@ -861,16 +870,16 @@ export class DriverGateway {
     );
   }
 
-  notifyClaimed(rideId: string, acceptedByUserId?: string) {
+  notifyClaimed(rideId: string, acceptedByUserId?: string, eventId?: string) {
     this.offerAudience.forget(rideId);
     if (!this.server) return;
     if (acceptedByUserId) {
       this.server
         .to('drivers-online')
         .except(`driver-${acceptedByUserId}`)
-        .emit('RideRequestClaimed', { rideId, acceptedByUserId });
+        .emit('RideRequestClaimed', { rideId, acceptedByUserId, ...(eventId ? { eventId } : {}) });
     } else {
-      this.server.to('drivers-online').emit('RideRequestClaimed', { rideId });
+      this.server.to('drivers-online').emit('RideRequestClaimed', { rideId, ...(eventId ? { eventId } : {}) });
     }
   }
 }
@@ -942,10 +951,12 @@ export class RideTrackingGateway {
   private lastLocations = new Map<string, CaptainLocationPayload>();
   private pendingTerminations = new Map<string, EarlyTerminationPayload>();
   private riderByRide = new Map<string, string>();
+  private terminationLocks = new Map<string, Promise<void>>();
 
   constructor(
     private readonly identity: SocketIdentity,
     private readonly prisma: PrismaService,
+    private readonly authorization: RideTrackingAuthorizationService,
   ) {}
 
   getLastLocation(rideId: string): CaptainLocationPayload | undefined {
@@ -988,51 +999,74 @@ export class RideTrackingGateway {
     return (await this.identity.userId(client, claimedUserId)) ?? '';
   }
 
+  /** Resolve the caller's role from the signed-in identity and current DB ownership. */
+  private async authorizeRide(
+    client: Socket,
+    rideId: string,
+    roles: RideParticipantRole[],
+    statuses?: number[],
+  ): Promise<{ ride: import('./ride-tracking.authorization').AuthorizedRide; userId: string; role: RideParticipantRole } | null> {
+    const userId = await this.userId(client);
+    if (!userId) return null;
+    const authorized = await this.authorization.authorize(rideId, userId, roles, statuses);
+    return authorized ? { ...authorized, userId } : null;
+  }
+
+  private async withTerminationLock<T>(rideId: string, action: () => Promise<T>): Promise<T> {
+    const key = rideId.toLowerCase();
+    const previous = this.terminationLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const tail = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => tail);
+    this.terminationLocks.set(key, queued);
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+      if (this.terminationLocks.get(key) === queued) this.terminationLocks.delete(key);
+    }
+  }
+
+  private validLocation(loc: BroadcastCaptainLocationMessage): boolean {
+    return loc.latitude >= -90 && loc.latitude <= 90 &&
+      loc.longitude >= -180 && loc.longitude <= 180 &&
+      (loc.heading === undefined || (loc.heading >= 0 && loc.heading <= 360)) &&
+      (loc.speed === undefined || loc.speed >= 0);
+  }
+
   @SubscribeMessage('JoinRide')
   async joinRide(@ConnectedSocket() client: Socket, @MessageBody() data: unknown) {
     const message = parseJoinRide(data);
     const rideId = message.rideId;
-    if (!rideId) return { success: false, reason: 'MISSING_RIDE_ID' };
-
-    const directUserId = message.userId;
-    const resolvedUserId = await this.userId(client, directUserId);
-    if (!resolvedUserId) return { success: false, reason: 'UNAUTHORIZED' };
-
-    const lowerRideId = rideId.toLowerCase();
-    await client.join(`ride-${rideId}`);
-    if (lowerRideId !== rideId) {
-      await client.join(`ride-${lowerRideId}`);
-    }
-    if (resolvedUserId) {
-      await client.join(`user-${resolvedUserId}`);
-      const lowerUserId = resolvedUserId.toLowerCase();
-      if (lowerUserId !== resolvedUserId) {
-        await client.join(`user-${lowerUserId}`);
-      }
+    if (!rideId || !RIDE_ID_PATTERN.test(rideId)) return { success: false, reason: 'INVALID_REQUEST' };
+    const authorized = await this.authorizeRide(client, rideId, ['rider', 'driver']);
+    if (!authorized) return { success: false, reason: 'UNAUTHORIZED' };
+    const { ride, userId: resolvedUserId } = authorized;
+    // A client-supplied identity is only an assertion and must match the verified identity.
+    if (message.userId && message.userId.toLowerCase() !== resolvedUserId.toLowerCase()) {
+      return { success: false, reason: 'UNAUTHORIZED' };
     }
 
-    let state: RideStateSnapshot | null = null;
-    try {
-      state = await this.buildRideState(rideId);
-    } catch (err) {
-      console.warn(`[RideTrackingGateway] Error building ride state for ${rideId}:`, err);
-    }
-    console.log(
-      `[RideTrackingGateway] Boundary C: JoinRide client=${client.id} userId=${resolvedUserId || 'anonymous'} rideId=${rideId} stateStatus=${state?.status}`
-    );
+    const canonicalRideId = ride.id.toLowerCase();
+    const state = await this.buildRideState(ride.id);
+    const stillAuthorized = await this.authorizeRide(client, canonicalRideId, ['rider', 'driver']);
+    if (!state || !stillAuthorized) return { success: false, reason: 'UNAUTHORIZED' };
+    await client.join(`ride-${canonicalRideId}`);
+    await client.join(`user-${resolvedUserId.toLowerCase()}`);
 
     client.emit('JoinRideAcknowledged', {
-      rideId,
+      rideId: canonicalRideId,
       userId: resolvedUserId,
       success: true,
       status: state?.status,
     });
 
     if (state) {
-      this.rememberRider(rideId, state.riderUserId);
+      this.rememberRider(canonicalRideId, state.riderUserId);
       client.emit('RideStateSync', state);
     }
-    return { success: true, rideId, status: state?.status, state };
+    return { success: true, rideId: canonicalRideId, status: state?.status, state };
   }
 
   @SubscribeMessage('LeaveRide')
@@ -1048,33 +1082,28 @@ export class RideTrackingGateway {
     @MessageBody() data: unknown,
   ) {
     const loc = parseBroadcastCaptainLocation(data);
-    if (!loc) return;
-    const { rideId } = loc;
-    this.lastLocations.set(rideId, loc);
-
-    const rideRow = await this.prisma.rideRequest.findFirst({
-      where: { id: rideId, isDeleted: false },
-      select: {
-        riderUserId: true,
-        pickupLatitude: true,
-        pickupLongitude: true,
-        status: true,
-      },
-    });
-    this.emitRide(rideId, 'CaptainLocationUpdated', loc, rideRow?.riderUserId);
+    if (!loc || !RIDE_ID_PATTERN.test(loc.rideId) || !this.validLocation(loc)) {
+      return { success: false, reason: 'INVALID_REQUEST' };
+    }
+    const authorized = await this.authorizeRide(client, loc.rideId, ['driver'], [
+      RideRequestStatus.Assigned,
+      RideRequestStatus.InProgress,
+    ]);
+    if (!authorized) return { success: false, reason: 'UNAUTHORIZED_OR_INVALID_STATE' };
+    const { ride } = authorized;
+    const rideId = ride.id.toLowerCase();
+    const safeLocation = { ...loc, rideId, timestamp: new Date().toISOString() };
+    this.lastLocations.set(rideId, safeLocation);
+    this.emitRide(rideId, 'CaptainLocationUpdated', safeLocation, ride.riderUserId);
 
     // Proximity check for arrival prompt (< 100 meters)
     if (!this.arrivedRides.has(rideId)) {
-      const ride = rideRow;
       if (
-        ride &&
-        ride.status === 2 && // Assigned
-        ride.pickupLatitude != null &&
-        ride.pickupLongitude != null
+        ride.status === RideRequestStatus.Assigned
       ) {
         const distKm = haversineDistanceKm(
-          loc.latitude,
-          loc.longitude,
+          safeLocation.latitude,
+          safeLocation.longitude,
           ride.pickupLatitude,
           ride.pickupLongitude,
         );
@@ -1088,6 +1117,7 @@ export class RideTrackingGateway {
         }
       }
     }
+    return { success: true };
   }
 
   @SubscribeMessage('ConfirmArrival')
@@ -1096,10 +1126,52 @@ export class RideTrackingGateway {
     @MessageBody() data: unknown,
   ) {
     const rideId = parseConfirmArrival(data).rideId;
-    if (!rideId) return;
-
-    this.arrivedRides.add(rideId);
-    this.publishArrivalConfirmed(rideId);
+    if (!rideId || !RIDE_ID_PATTERN.test(rideId)) return { success: false, reason: 'INVALID_REQUEST' };
+    const authorized = await this.authorizeRide(client, rideId, ['driver'], [RideRequestStatus.Assigned]);
+    if (!authorized) return { success: false, reason: 'UNAUTHORIZED_OR_INVALID_STATE' };
+    if (authorized.ride.driverArrivedAt) return { success: true, idempotent: true };
+    const arrivedAt = new Date();
+    const eventId = newId();
+    const confirmed = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.rideRequest.updateMany({
+        where: {
+          id: authorized.ride.id,
+          driverId: authorized.ride.driverId,
+          isDeleted: false,
+          status: RideRequestStatus.Assigned,
+          driverArrivedAt: null,
+        },
+        data: { driverArrivedAt: arrivedAt, updatedAt: arrivedAt },
+      });
+      if (result.count === 1) {
+        await tx.outboxEvent.create({
+          data: {
+            id: eventId,
+            eventType: 'ride.arrived',
+            aggregateId: authorized.ride.id,
+            payload: { riderUserId: authorized.ride.riderUserId, arrivedAt: arrivedAt.toISOString() },
+          },
+        });
+      }
+      return result;
+    });
+    if (confirmed.count !== 1) {
+      const current = await this.prisma.rideRequest.findFirst({
+        where: { id: authorized.ride.id, driverId: authorized.ride.driverId, isDeleted: false },
+      });
+      if (current?.status === RideRequestStatus.Assigned && current.driverArrivedAt) {
+        return { success: true, idempotent: true };
+      }
+      return { success: false, reason: 'UNAUTHORIZED_OR_INVALID_STATE' };
+    }
+    this.publishArrivalConfirmed(authorized.ride.id.toLowerCase(), authorized.ride.riderUserId, eventId);
+    if (this.server) {
+      await this.prisma.outboxEvent.update({
+        where: { id: eventId },
+        data: { status: 'delivered', deliveredAt: new Date(), processingStartedAt: null },
+      });
+    }
+    return { success: true };
   }
 
   @SubscribeMessage('RequestTermination')
@@ -1108,15 +1180,29 @@ export class RideTrackingGateway {
     @MessageBody() data: unknown,
   ) {
     const message = parseRequestTermination(data);
-    if (!message.rideId) return;
-
-    this.publishTerminationRequested(
-      message.rideId,
-      message.initiator,
-      message.reason,
-      message.latitude,
-      message.longitude,
-    );
+    if (!RIDE_ID_PATTERN.test(message.rideId) ||
+      (message.latitude !== undefined && (message.latitude < -90 || message.latitude > 90)) ||
+      (message.longitude !== undefined && (message.longitude < -180 || message.longitude > 180)) ||
+      ((message.latitude === undefined) !== (message.longitude === undefined))) {
+      return { success: false, reason: 'INVALID_REQUEST' };
+    }
+    return this.withTerminationLock(message.rideId, async () => {
+      const authorized = await this.authorizeRide(client, message.rideId, ['rider', 'driver'], [RideRequestStatus.InProgress]);
+      if (!authorized) return { success: false, reason: 'UNAUTHORIZED_OR_INVALID_STATE' };
+      const rideId = authorized.ride.id.toLowerCase();
+      if (this.pendingTerminations.has(rideId)) return { success: false, reason: 'TERMINATION_PENDING' };
+      const term: EarlyTerminationPayload = {
+        rideId,
+        initiator: authorized.role,
+        reason: message.reason.trim().slice(0, 500) || 'Emergency',
+        requestedAt: new Date().toISOString(),
+        latitude: message.latitude,
+        longitude: message.longitude,
+      };
+      this.pendingTerminations.set(rideId, term);
+      this.server?.to(`ride-${rideId}`).emit('RideTerminationRequested', term);
+      return { success: true };
+    });
   }
 
   @SubscribeMessage('ResolveTermination')
@@ -1127,38 +1213,55 @@ export class RideTrackingGateway {
     const message = parseResolveTermination(data);
     const rideId = message.rideId;
     const accept = message.accept;
-    if (!rideId) return;
-
-    if (accept) {
-      const updated = await this.prisma.rideRequest.update({
-        where: { id: rideId },
-        data: {
-          status: 4, // Completed
-          completedAt: new Date(),
-          updatedAt: new Date(),
-        },
-      });
-      this.pendingTerminations.delete(rideId);
-      this.publishTerminationResolved(rideId, true);
-      this.publishRideCompleted(
-        updated.id,
-        updated.completedAt ?? new Date(),
-        Number(updated.fareAmount),
-        updated.distanceKm ? Number(updated.distanceKm) : undefined,
-      );
-    } else {
-      this.pendingTerminations.delete(rideId);
-      this.publishTerminationResolved(rideId, false);
+    const raw = Array.isArray(data) ? data[0] : data;
+    if (!RIDE_ID_PATTERN.test(rideId) || !raw || typeof raw !== 'object' ||
+      typeof (raw as Record<string, unknown>).accept !== 'boolean') {
+      return { success: false, reason: 'INVALID_REQUEST' };
     }
+    return this.withTerminationLock(rideId, async () => {
+      const authorized = await this.authorizeRide(client, rideId, ['rider', 'driver'], [RideRequestStatus.InProgress]);
+      if (!authorized) return { success: false, reason: 'UNAUTHORIZED_OR_INVALID_STATE' };
+      const canonicalId = authorized.ride.id.toLowerCase();
+      const pending = this.pendingTerminations.get(canonicalId);
+      if (!pending || pending.initiator === authorized.role) {
+        return { success: false, reason: 'UNAUTHORIZED_OR_INVALID_STATE' };
+      }
+      if (accept) {
+        const now = new Date();
+        const completion = await this.authorization.completeEarly(authorized.ride, now);
+        if (!completion.completed) return { success: false, reason: 'UNAUTHORIZED_OR_INVALID_STATE' };
+        this.pendingTerminations.delete(canonicalId);
+        if (this.server) {
+          this.publishTerminationResolved(canonicalId, true, completion.eventId);
+          this.publishRideCompleted(
+            authorized.ride.id,
+            now,
+            Number(authorized.ride.totalAmount ?? authorized.ride.fareAmount),
+            authorized.ride.distanceKm == null ? undefined : Number(authorized.ride.distanceKm),
+            authorized.ride.riderUserId,
+            completion.eventId,
+          );
+          await this.prisma.outboxEvent.update({
+            where: { id: completion.eventId },
+            data: { status: 'delivered', deliveredAt: now, processingStartedAt: null },
+          });
+        }
+      } else {
+        this.pendingTerminations.delete(canonicalId);
+        this.publishTerminationResolved(canonicalId, false);
+      }
+      return { success: true, accepted: accept };
+    });
   }
 
   // Authoritative publishers
-  publishRideAccepted(ride: AcceptedRidePayload) {
+  publishRideAccepted(ride: AcceptedRidePayload, eventId?: string) {
     if (!this.server || !ride?.id) return;
     const payload = {
       ...ride,
       id: ride.id,
       rideId: ride.id,
+      ...(eventId ? { eventId } : {}),
     };
     console.log(
       `[RideTrackingGateway] Boundary D: publishRideAccepted emitted for rideId=${ride.id} riderUserId=${ride.riderUserId} driverName=${ride.driverName}`
@@ -1189,26 +1292,31 @@ export class RideTrackingGateway {
     this.emitRide(rideId, 'CaptainLocationUpdated', location, riderUserId);
   }
 
-  publishArrivalConfirmed(rideId: string, riderUserId?: string | null) {
+  publishArrivalConfirmed(rideId: string, riderUserId?: string | null, eventId?: string) {
+    if (this.arrivedRides.has(rideId)) return false;
     this.arrivedRides.add(rideId);
     const event = {
       rideId,
       status: 'Assigned',
       arrivedAtPickup: true,
       timestamp: new Date().toISOString(),
+      ...(eventId ? { eventId } : {}),
     };
     this.emitRide(rideId, 'CaptainArrivalConfirmed', event, riderUserId);
+    return true;
   }
 
   publishRideStarted(
     rideId: string,
     startedAt?: Date | null,
     riderUserId?: string | null,
+    eventId?: string,
   ) {
     const event = {
       rideId,
       status: 'InProgress',
       startedAt: (startedAt ?? new Date()).toISOString(),
+      ...(eventId ? { eventId } : {}),
     };
     this.emitRide(rideId, 'RideStarted', event, riderUserId);
   }
@@ -1219,6 +1327,7 @@ export class RideTrackingGateway {
     fareAmount?: number,
     distanceKm?: number,
     riderUserId?: string | null,
+    eventId?: string,
   ) {
     this.arrivedRides.delete(rideId);
     this.pendingTerminations.delete(rideId);
@@ -1228,6 +1337,7 @@ export class RideTrackingGateway {
       completedAt: (completedAt ?? new Date()).toISOString(),
       fareAmount,
       distanceKm,
+      ...(eventId ? { eventId } : {}),
     };
     this.emitRide(rideId, 'RideCompleted', event, riderUserId);
   }
@@ -1236,20 +1346,24 @@ export class RideTrackingGateway {
     rideId: string,
     fareAmount: number,
     riderUserId?: string | null,
+    eventId?: string,
   ) {
+    if (this.collectedRides.has(rideId)) return false;
     this.collectedRides.add(rideId);
     this.emitRide(
       rideId,
       'FareCollected',
-      { rideId, fareAmount, collected: true },
+      { rideId, fareAmount, collected: true, ...(eventId ? { eventId } : {}) },
       riderUserId,
     );
+    return true;
   }
 
   publishRideCancelled(
     rideId: string,
     cancelledBy: 'rider' | 'driver',
     reason?: string,
+    eventId?: string,
   ) {
     this.arrivedRides.delete(rideId);
     this.pendingTerminations.delete(rideId);
@@ -1260,6 +1374,7 @@ export class RideTrackingGateway {
       cancelledBy,
       reason: reason ?? null,
       cancelledAt: new Date().toISOString(),
+      ...(eventId ? { eventId } : {}),
     };
     this.server.to(`ride-${rideId}`).emit('RideCancelled', event);
   }
@@ -1284,13 +1399,14 @@ export class RideTrackingGateway {
     this.server.to(`ride-${rideId}`).emit('RideTerminationRequested', term);
   }
 
-  publishTerminationResolved(rideId: string, accepted: boolean) {
+  publishTerminationResolved(rideId: string, accepted: boolean, eventId?: string) {
     this.pendingTerminations.delete(rideId);
     if (!this.server || !rideId) return;
     this.server.to(`ride-${rideId}`).emit('RideTerminationResolved', {
       rideId,
       accepted,
       completed: accepted,
+      ...(eventId ? { eventId } : {}),
     });
   }
 
@@ -1310,7 +1426,7 @@ export class RideTrackingGateway {
       rideId: ride.id,
       riderUserId: ride.riderUserId,
       status: rideStatusLabel(ride.status),
-      arrivedAtPickup: this.arrivedRides.has(ride.id),
+      arrivedAtPickup: Boolean(ride.driverArrivedAt) || this.arrivedRides.has(ride.id),
       driverId: ride.driverId,
       driverName: ride.driver?.user?.fullName ?? null,
       driverPhone: ride.driver?.user?.phone ?? null,

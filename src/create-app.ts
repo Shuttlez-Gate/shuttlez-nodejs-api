@@ -12,6 +12,8 @@ import { json, urlencoded, type Express } from 'express';
 import { AppModule } from './app.module';
 import { driverTripsRateLimit } from './common/middleware/driver-trips-rate-limit';
 import { resolveOperationalTimeZone } from './common/utils/operational-clock';
+import { RedisSocketIoAdapter } from './modules/realtime/redis-socket-io.adapter';
+import { SocketIoReadinessService } from './modules/realtime/socket-io-readiness.service';
 
 const logger = new Logger('CreateApp');
 
@@ -87,6 +89,18 @@ export async function createNestApp(
 
   const config = app.get(ConfigService);
   logOperationalTimeZone(config);
+
+  const redisUrl = config.get<string>('REDIS_URL')?.trim();
+  const socketRedisRequired =
+    config.get<string>('SOCKET_IO_REDIS_REQUIRED')?.trim().toLowerCase() === 'true';
+  const readiness = app.get(SocketIoReadinessService);
+  const socketIoAdapter = new RedisSocketIoAdapter(
+    app,
+    { redisUrl, required: socketRedisRequired },
+    readiness,
+  );
+  await socketIoAdapter.initialize();
+  app.useWebSocketAdapter(socketIoAdapter);
 
   const envOrigins = (config.get<string>('CORS_ALLOWED_ORIGINS') ?? '')
     .split(',')

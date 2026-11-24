@@ -140,6 +140,8 @@ model Driver {
   ownedRoutes           Route[]
   cancellationRequests  CancellationRequest[]
   commissionPayments    CaptainCommissionPayment[]
+  rideOfferDecisions    RideOfferDecision[]
+  cashCollections       RideCashCollection[]
 
   @@index([vehicleId], map: "IX_DriversSet_VehicleId")
   @@map("DriversSet")
@@ -695,6 +697,7 @@ model RideRequest {
   isCashConfirmed      Boolean       @map("IsCashConfirmed")
   driverId             String?       @map("DriverId") @db.Uuid
   assignedAt           DateTime?     @map("AssignedAt") @db.Timestamptz(6)
+  driverArrivedAt      DateTime?     @map("DriverArrivedAt") @db.Timestamptz(6)
   startedAt            DateTime?     @map("StartedAt") @db.Timestamptz(6)
   completedAt          DateTime?     @map("CompletedAt") @db.Timestamptz(6)
   cancelledAt          DateTime?     @map("CancelledAt") @db.Timestamptz(6)
@@ -711,6 +714,8 @@ model RideRequest {
   driver               Driver?       @relation(fields: [driverId], references: [id], onUpdate: NoAction, map: "FK_RideRequestsSet_DriversSet_DriverId")
   rideFareRule         RideFareRule? @relation(fields: [rideFareRuleId], references: [id], onUpdate: NoAction, map: "FK_RideRequestsSet_RideFareRulesSet_RideFareRuleId")
   rider                User          @relation("RideRider", fields: [riderUserId], references: [id], onUpdate: NoAction, map: "FK_RideRequestsSet_UsersSet_RiderUserId")
+  offerDecisions       RideOfferDecision[]
+  cashCollection       RideCashCollection?
 
   @@index([driverId], map: "IX_RideRequestsSet_DriverId")
   @@index([rideFareRuleId], map: "IX_RideRequestsSet_RideFareRuleId")
@@ -719,6 +724,51 @@ model RideRequest {
   @@index([status], map: "IX_RideRequestsSet_Status")
   @@index([status, createdAt], map: "IX_RideRequestsSet_Status_CreatedAt")
   @@map("RideRequestsSet")
+}
+
+model RideOfferDecision {
+  id        String   @id(map: "PK_RideOfferDecisionsSet") @map("Id") @db.Uuid
+  rideId    String   @map("RideId") @db.Uuid
+  driverId  String   @map("DriverId") @db.Uuid
+  decision  String   @map("Decision") @db.VarChar(20)
+  decidedAt DateTime @map("DecidedAt") @db.Timestamptz(6)
+  ride      RideRequest @relation(fields: [rideId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_RideOfferDecisionsSet_RideRequestsSet_RideId")
+  driver    Driver   @relation(fields: [driverId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_RideOfferDecisionsSet_DriversSet_DriverId")
+
+  @@unique([rideId, driverId], map: "UX_RideOfferDecisionsSet_Ride_Driver")
+  @@index([driverId, decision, decidedAt], map: "IX_RideOfferDecisionsSet_Driver_Decision_Date")
+  @@map("RideOfferDecisionsSet")
+}
+
+model RideCashCollection {
+  id             String   @id(map: "PK_RideCashCollectionsSet") @map("Id") @db.Uuid
+  rideId         String   @unique(map: "UX_RideCashCollectionsSet_RideId") @map("RideId") @db.Uuid
+  driverId       String   @map("DriverId") @db.Uuid
+  amount         Decimal  @map("Amount") @db.Decimal(18, 2)
+  currency       String   @default("EGP") @map("Currency") @db.VarChar(8)
+  collectedAt    DateTime @map("CollectedAt") @db.Timestamptz(6)
+  ride           RideRequest @relation(fields: [rideId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "FK_RideCashCollectionsSet_RideRequestsSet_RideId")
+  driver         Driver  @relation(fields: [driverId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "FK_RideCashCollectionsSet_DriversSet_DriverId")
+
+  @@index([driverId, collectedAt], map: "IX_RideCashCollectionsSet_Driver_Date")
+  @@map("RideCashCollectionsSet")
+}
+
+model OutboxEvent {
+  id                 String    @id(map: "PK_OutboxEventsSet") @map("Id") @db.Uuid
+  eventType          String    @map("EventType") @db.VarChar(80)
+  aggregateId        String    @map("AggregateId") @db.Uuid
+  payload            Json      @map("Payload")
+  status             String    @default("pending") @map("Status") @db.VarChar(16)
+  attemptCount       Int       @default(0) @map("AttemptCount")
+  nextAttemptAt      DateTime  @default(now()) @map("NextAttemptAt") @db.Timestamptz(6)
+  processingStartedAt DateTime? @map("ProcessingStartedAt") @db.Timestamptz(6)
+  lastError          String?   @map("LastError") @db.VarChar(2000)
+  deliveredAt        DateTime? @map("DeliveredAt") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("CreatedAt") @db.Timestamptz(6)
+
+  @@index([status, nextAttemptAt, createdAt], map: "IX_OutboxEventsSet_Pending")
+  @@map("OutboxEventsSet")
 }
 
 model GroupRequest {

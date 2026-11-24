@@ -13,6 +13,7 @@ import { newId } from '../../common/utils/date.util';
 import { userDefaults, driverDefaults, baseFields } from '../../common/utils/entity-defaults';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { DriversService } from './drivers.service';
+import { RideOutboxService } from '../realtime/ride-outbox.service';
 import { RidesService } from '../rides/rides.service';
 import { BookingsController } from '../bookings/bookings.controller';
 import { AdminGroupsController } from '../admin/admin-support.controller';
@@ -31,7 +32,17 @@ import { createNestApp } from '../../create-app';
 jest.setTimeout(120000);
 
 const urlPath = path.resolve(__dirname, '../../../.local/pg-test/database-url');
-const databaseUrl = readFileSync(urlPath, 'utf8').trim();
+const databaseUrl =
+  process.env.SHUTTLEZ_INTEGRATION_DATABASE_URL ?? readFileSync(urlPath, 'utf8').trim();
+const integrationDatabasePort = Number(process.env.SHUTTLEZ_INTEGRATION_DATABASE_PORT ?? 54329);
+const integrationDatabaseTarget = new URL(databaseUrl);
+if (
+  integrationDatabaseTarget.hostname !== '127.0.0.1' ||
+  integrationDatabaseTarget.pathname !== '/shuttlez_integration_test' ||
+  Number(integrationDatabaseTarget.port) !== integrationDatabasePort
+) {
+  throw new Error('Refusing to run: integration database URL is not the configured loopback test database');
+}
 const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
 const db = prisma as unknown as PrismaService;
 
@@ -125,6 +136,35 @@ function driversFor(userId: string) {
   );
 }
 
+function driversWithOutbox(userId: string, shouldFailEnqueue = false) {
+  const outbox = {
+    enqueue: async (tx: Prisma.TransactionClient, event: { eventType: string; aggregateId: string; payload: unknown }) => {
+      if (shouldFailEnqueue) throw new Error('outbox insert failed');
+      return tx.outboxEvent.create({
+        data: {
+          id: newId(),
+          eventType: event.eventType,
+          aggregateId: event.aggregateId,
+          payload: JSON.parse(JSON.stringify(event.payload)) as Prisma.InputJsonValue,
+        },
+      });
+    },
+    wake: jest.fn(),
+  } as unknown as RideOutboxService;
+  return new DriversService(
+    db,
+    asUser(userId),
+    new RidesService(db, asUser(userId), {} as FareService),
+    {} as GroupsService,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    outbox,
+  );
+}
+
 function ridesFor(userId: string) {
   return new RidesService(db, asUser(userId), {} as FareService);
 }
@@ -179,7 +219,10 @@ describe('PostgreSQL integration', () => {
   beforeAll(async () => {
     const identity = await prisma.$queryRaw<Array<{ db: string; port: number }>>`
       SELECT current_database() AS db, inet_server_port() AS port`;
-    if (identity[0]?.db !== 'shuttlez_integration_test' || Number(identity[0]?.port) !== 54329) {
+    if (
+      identity[0]?.db !== 'shuttlez_integration_test' ||
+      Number(identity[0]?.port) !== integrationDatabasePort
+    ) {
       throw new Error('Refusing to run: connection is not the isolated test database');
     }
     db.markTripFullIfNeeded = async () => undefined;
@@ -206,8 +249,17 @@ describe('PostgreSQL integration', () => {
     await prisma.supportMessage.deleteMany({ where: { ticket: { userId: { in: ids } } } });
     await prisma.supportTicket.deleteMany({ where: { userId: { in: ids } } });
     await prisma.booking.deleteMany({ where: { userId: { in: ids } } });
-    await prisma.rideRequest.deleteMany({
+    const testRides = await prisma.rideRequest.findMany({
       where: { OR: [{ riderUserId: { in: ids } }, { driver: { userId: { in: ids } } }] },
+      select: { id: true },
+    });
+    const testRideIds = testRides.map((ride) => ride.id);
+    if (testRideIds.length > 0) {
+      await prisma.rideCashCollection.deleteMany({ where: { rideId: { in: testRideIds } } });
+      await prisma.outboxEvent.deleteMany({ where: { aggregateId: { in: testRideIds } } });
+    }
+    await prisma.rideRequest.deleteMany({
+      where: { id: { in: testRideIds } },
     });
     await prisma.groupRequest.deleteMany({
       where: { OR: [{ organizerUserId: { in: ids } }, { driver: { userId: { in: ids } } }] },
@@ -274,6 +326,92 @@ describe('PostgreSQL integration', () => {
     expect(await prisma.rideRequest.count({ where: { id: ride.id } })).toBe(1);
   });
 
+  it('persists one cash collection and one outbox event under concurrent collection requests', async () => {
+    const rider = await createUser(`0131${Date.now().toString().slice(-7)}`);
+    const captain = await createCaptain(`0132${Date.now().toString().slice(-7)}`, true);
+    createdUsers.push(rider.id, captain.user.id);
+    const ride = await createRide(rider.id);
+    const service = driversWithOutbox(captain.user.id);
+    await service.acceptRide(ride.id);
+    await service.startRide(ride.id);
+
+    const results = await Promise.all([
+      service.confirmRideCash(ride.id),
+      service.confirmRideCash(ride.id),
+    ]);
+    expect(results.map((result) => result.idempotent).sort()).toEqual([false, true]);
+    expect(await prisma.rideCashCollection.count({ where: { rideId: ride.id } })).toBe(1);
+    expect(await prisma.outboxEvent.count({ where: { eventType: 'ride.cash_collected', aggregateId: ride.id } })).toBe(1);
+  });
+
+  it('rolls back cash collection if its outbox insert fails', async () => {
+    const rider = await createUser(`0133${Date.now().toString().slice(-7)}`);
+    const captain = await createCaptain(`0134${Date.now().toString().slice(-7)}`, true);
+    createdUsers.push(rider.id, captain.user.id);
+    const ride = await createRide(rider.id);
+    await driversFor(captain.user.id).acceptRide(ride.id);
+    await driversFor(captain.user.id).startRide(ride.id);
+
+    await expect(driversWithOutbox(captain.user.id, true).confirmRideCash(ride.id))
+      .rejects.toThrow('outbox insert failed');
+    expect(await prisma.rideCashCollection.count({ where: { rideId: ride.id } })).toBe(0);
+  });
+
+  it('rejects cash collection for an assigned ride and for a different driver', async () => {
+    const rider = await createUser(`0135${Date.now().toString().slice(-7)}`);
+    const captain = await createCaptain(`0136${Date.now().toString().slice(-7)}`, true);
+    const otherCaptain = await createCaptain(`0137${Date.now().toString().slice(-7)}`, true);
+    createdUsers.push(rider.id, captain.user.id, otherCaptain.user.id);
+    const ride = await createRide(rider.id);
+    await driversFor(captain.user.id).acceptRide(ride.id);
+
+    await expect(driversWithOutbox(captain.user.id).confirmRideCash(ride.id)).rejects.toThrow();
+    await expect(driversWithOutbox(otherCaptain.user.id).confirmRideCash(ride.id)).rejects.toThrow();
+    expect(await prisma.rideCashCollection.count({ where: { rideId: ride.id } })).toBe(0);
+  });
+
+  it('persists driver rejection once, hides it only from that driver, and allows another driver', async () => {
+    const rider = await createUser(`0138${Date.now().toString().slice(-7)}`);
+    const rejectingCaptain = await createCaptain(`0139${Date.now().toString().slice(-7)}`, true);
+    const otherCaptain = await createCaptain(`0140${Date.now().toString().slice(-7)}`, true);
+    createdUsers.push(rider.id, rejectingCaptain.user.id, otherCaptain.user.id);
+    const ride = await createRide(rider.id);
+
+    const results = await Promise.all([
+      driversFor(rejectingCaptain.user.id).rejectRide(ride.id),
+      driversFor(rejectingCaptain.user.id).rejectRide(ride.id),
+    ]);
+    expect(results.every((result) => result.rejected)).toBe(true);
+    expect(await prisma.rideOfferDecision.count({ where: { rideId: ride.id, driverId: rejectingCaptain.driver.id } })).toBe(1);
+    expect((await driversFor(rejectingCaptain.user.id).pendingNearbyRides(30.05, 31.24, 5)).map((item) => item.id)).not.toContain(ride.id);
+    expect((await driversFor(otherCaptain.user.id).pendingNearbyRides(30.05, 31.24, 5)).map((item) => item.id)).toContain(ride.id);
+  });
+
+  it('serializes rejection against assignment without rejecting the shared ride', async () => {
+    const rider = await createUser(`0141${Date.now().toString().slice(-7)}`);
+    const captain = await createCaptain(`0142${Date.now().toString().slice(-7)}`, true);
+    createdUsers.push(rider.id, captain.user.id);
+    const ride = await createRide(rider.id);
+    const service = driversFor(captain.user.id);
+    const results = await Promise.all([
+      outcome(service.acceptRide(ride.id)),
+      outcome(service.rejectRide(ride.id)),
+    ]);
+    const stored = await prisma.rideRequest.findUniqueOrThrow({ where: { id: ride.id } });
+    const rejection = await prisma.rideOfferDecision.findUnique({
+      where: { rideId_driverId: { rideId: ride.id, driverId: captain.driver.id } },
+    });
+    expect([RideRequestStatus.Requested, RideRequestStatus.Assigned]).toContain(stored.status);
+    if (stored.status === RideRequestStatus.Assigned) {
+      expect(stored.driverId).toBe(captain.driver.id);
+      expect(rejection).toBeNull();
+    } else {
+      expect(stored.driverId).toBeNull();
+      expect(rejection).not.toBeNull();
+    }
+    expect(results.some((result) => result.ok)).toBe(true);
+  });
+
   it('rejects acceptance after cancellation and keeps a second cancel idempotent', async () => {
     const rider = await createUser(`0190${Date.now().toString().slice(-7)}`);
     const captain = await createCaptain(`0189${Date.now().toString().slice(-7)}`, true);
@@ -313,31 +451,26 @@ describe('PostgreSQL integration', () => {
     }
   });
 
-  it('does not complete a ride that was not assigned, and complete after accept stays completed', async () => {
+  it('does not complete a ride before it is started, and complete after start stays completed', async () => {
     const rider = await createUser(`0198${Date.now().toString().slice(-7)}`);
     const captain = await createCaptain(`0181${Date.now().toString().slice(-7)}`, true);
     createdUsers.push(rider.id, captain.user.id);
     const unassigned = await createRide(rider.id);
-    const raced = await Promise.all([
-      outcome(driversFor(captain.user.id).acceptRide(unassigned.id)),
-      outcome(driversFor(captain.user.id).completeRide(unassigned.id)),
-    ]);
+    const premature = await outcome(driversFor(captain.user.id).completeRide(unassigned.id));
+    expect(premature.ok).toBe(false);
+    await driversFor(captain.user.id).acceptRide(unassigned.id);
     const stored = await prisma.rideRequest.findUniqueOrThrow({ where: { id: unassigned.id } });
-    expect(stored.driverId === null || stored.driverId === captain.driver.id).toBe(true);
-    expect([RideRequestStatus.Requested, RideRequestStatus.Assigned, RideRequestStatus.Completed]).toContain(
-      stored.status,
-    );
-    if (stored.status === RideRequestStatus.Completed) {
-      expect(stored.driverId).toBe(captain.driver.id);
-    }
-    expect(raced.some((item) => item.ok)).toBe(true);
-    if (stored.status === RideRequestStatus.Assigned) {
-      await driversFor(captain.user.id).completeRide(unassigned.id);
-    }
+    expect(stored.status).toBe(RideRequestStatus.Assigned);
+    expect(stored.driverId).toBe(captain.driver.id);
+    const stillAssigned = await outcome(driversFor(captain.user.id).completeRide(unassigned.id));
+    expect(stillAssigned.ok).toBe(false);
+    await driversFor(captain.user.id).startRide(unassigned.id);
+    await driversFor(captain.user.id).completeRide(unassigned.id);
 
     const second = await createRide(rider.id);
     const service = driversFor(captain.user.id);
     await service.acceptRide(second.id);
+    await service.startRide(second.id);
     await service.completeRide(second.id);
     const finished = await prisma.rideRequest.findUniqueOrThrow({ where: { id: second.id } });
     expect(finished.status).toBe(RideRequestStatus.Completed);
@@ -345,6 +478,101 @@ describe('PostgreSQL integration', () => {
     expect(rejected.ok).toBe(false);
     const after = await prisma.rideRequest.findUniqueOrThrow({ where: { id: second.id } });
     expect(after.status).toBe(RideRequestStatus.Completed);
+  });
+
+  it('makes repeated and concurrent ride starts idempotent', async () => {
+    const rider = await createUser(`0192${Date.now().toString().slice(-7)}`);
+    const captain = await createCaptain(`0193${Date.now().toString().slice(-7)}`, true);
+    createdUsers.push(rider.id, captain.user.id);
+    const ride = await createRide(rider.id);
+    const service = driversFor(captain.user.id);
+    await service.acceptRide(ride.id);
+
+    const results = await Promise.all([
+      outcome(service.startRide(ride.id)),
+      outcome(service.startRide(ride.id)),
+    ]);
+    expect(results.every((result) => result.ok)).toBe(true);
+    const stored = await prisma.rideRequest.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(stored.status).toBe(RideRequestStatus.InProgress);
+    expect(stored.startedAt).not.toBeNull();
+  });
+
+  it('allows only one completion transition when completion is requested concurrently', async () => {
+    const rider = await createUser(`0191${Date.now().toString().slice(-7)}`);
+    const captain = await createCaptain(`0190${Date.now().toString().slice(-7)}`, true);
+    createdUsers.push(rider.id, captain.user.id);
+    const ride = await createRide(rider.id);
+    const service = driversFor(captain.user.id);
+    await service.acceptRide(ride.id);
+    await service.startRide(ride.id);
+
+    const results = await Promise.all([
+      outcome(service.completeRide(ride.id)),
+      outcome(service.completeRide(ride.id)),
+    ]);
+    expect(results.every((result) => result.ok)).toBe(true);
+    const stored = await prisma.rideRequest.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(stored.status).toBe(RideRequestStatus.Completed);
+    expect(stored.completedAt).not.toBeNull();
+  });
+
+  it('keeps completion and cancellation mutually exclusive under a rider race', async () => {
+    const rider = await createUser(`0187${Date.now().toString().slice(-7)}`);
+    const captain = await createCaptain(`0188${Date.now().toString().slice(-7)}`, true);
+    createdUsers.push(rider.id, captain.user.id);
+    const ride = await createRide(rider.id);
+    const service = driversFor(captain.user.id);
+    await service.acceptRide(ride.id);
+    await service.startRide(ride.id);
+
+    await Promise.all([
+      outcome(service.completeRide(ride.id)),
+      outcome(ridesFor(rider.id).cancel(ride.id)),
+    ]);
+    const stored = await prisma.rideRequest.findUniqueOrThrow({ where: { id: ride.id } });
+    expect([RideRequestStatus.Completed, RideRequestStatus.Cancelled]).toContain(stored.status);
+    expect(stored.completedAt !== null).toBe(stored.status === RideRequestStatus.Completed);
+    expect(stored.cancelledAt !== null).toBe(stored.status === RideRequestStatus.Cancelled);
+  });
+
+  it('allows only one winner when ride completion races driver cancellation', async () => {
+    const rider = await createUser(`0194${Date.now().toString().slice(-7)}`);
+    const captain = await createCaptain(`0195${Date.now().toString().slice(-7)}`, true);
+    createdUsers.push(rider.id, captain.user.id);
+    const ride = await createRide(rider.id);
+    const service = driversFor(captain.user.id);
+    await service.acceptRide(ride.id);
+    await service.startRide(ride.id);
+
+    await Promise.all([
+      outcome(service.completeRide(ride.id)),
+      outcome(service.cancelRideByDriver(ride.id, 'race test')),
+    ]);
+    const stored = await prisma.rideRequest.findUniqueOrThrow({ where: { id: ride.id } });
+    expect([RideRequestStatus.Completed, RideRequestStatus.Cancelled]).toContain(stored.status);
+    expect(stored.completedAt !== null).toBe(stored.status === RideRequestStatus.Completed);
+    expect(stored.cancelledAt !== null).toBe(stored.status === RideRequestStatus.Cancelled);
+  });
+
+  it('does not let offer rejection overwrite or accept a ride completion', async () => {
+    const rider = await createUser(`0143${Date.now().toString().slice(-7)}`);
+    const captain = await createCaptain(`0144${Date.now().toString().slice(-7)}`, true);
+    createdUsers.push(rider.id, captain.user.id);
+    const ride = await createRide(rider.id);
+    const service = driversFor(captain.user.id);
+    await service.acceptRide(ride.id);
+    await service.startRide(ride.id);
+
+    const results = await Promise.all([
+      outcome(service.completeRide(ride.id)),
+      outcome(service.rejectRide(ride.id)),
+    ]);
+    const stored = await prisma.rideRequest.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(stored.status).toBe(RideRequestStatus.Completed);
+    expect(results[0].ok).toBe(true);
+    expect(results[1].ok).toBe(false);
+    expect(await prisma.rideOfferDecision.count({ where: { rideId: ride.id, driverId: captain.driver.id } })).toBe(0);
   });
 
   it('hides offers from an offline captain and shows a nearby online captain', async () => {

@@ -370,8 +370,8 @@ export class PackageRideService {
     });
   }
 
-  async finalizeTrip(tripId: string) {
-    await this.prisma.$transaction(async (tx) => {
+  async finalizeTrip(tripId: string, transaction?: Prisma.TransactionClient) {
+    const finalize = async (tx: Prisma.TransactionClient) => {
       const reservations = await tx.ridePackageReservation.findMany({
         where: {
           isDeleted: false,
@@ -402,7 +402,12 @@ export class PackageRideService {
               "UpdatedAt" = NOW()
           WHERE "Id" = ${subscription.id}::uuid`;
       }
-    });
+    };
+    if (transaction) {
+      await finalize(transaction);
+      return;
+    }
+    await this.prisma.$transaction(finalize);
   }
 
   async adminListPurchases(status?: string) {

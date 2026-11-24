@@ -15,7 +15,7 @@ import { ApiResponse } from '../../common/api-response';
 import { AdminOnly } from '../../common/decorators/admin-only.decorator';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { CurrentUserService } from '../../common/current-user.service';
-import { NotFoundException } from '../../common/exceptions/app.exception';
+import { AppException, NotFoundException } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/error-codes';
 import { pageRequestFrom, PagedResult } from '../../common/paged-result';
 import { newId, utcNow } from '../../common/utils/date.util';
@@ -366,14 +366,33 @@ export class AdminRidesController {
       at: ride.scheduledFor ?? utcNow(),
       excludeRideId: ride.id,
     });
-    const updated = await this.prisma.rideRequest.update({
-      where: { id: rideId },
+    const assignedAt = utcNow();
+    const assigned = await this.prisma.rideRequest.updateMany({
+      where: {
+        id: rideId,
+        isDeleted: false,
+        status: { in: [RideRequestStatus.Requested, RideRequestStatus.Assigned] },
+      },
       data: {
         driverId: driver.id,
         status: RideRequestStatus.Assigned,
-        assignedAt: utcNow(),
-        updatedAt: utcNow(),
+        assignedAt,
+        driverArrivedAt: null,
+        updatedAt: assignedAt,
       },
+    });
+    if (assigned.count !== 1) {
+      const current = await this.prisma.rideRequest.findFirst({
+        where: { id: rideId, isDeleted: false },
+        include: { driver: { include: { user: true, vehicle: true } } },
+      });
+      if (current?.status === RideRequestStatus.Assigned && current.driverId === driver.id) {
+        return ApiResponse.ok(this.rides.mapRide(current, requestedKind), 'Ride assigned');
+      }
+      throw new AppException('Ride state changed; it can no longer be assigned', 400, ErrorCodes.RideNotAssignable);
+    }
+    const updated = await this.prisma.rideRequest.findFirstOrThrow({
+      where: { id: rideId },
       include: { driver: { include: { user: true, vehicle: true } } },
     });
     publishRiderHistoryChange({
@@ -392,14 +411,32 @@ export class AdminRidesController {
     if (!ride) {
       throw new NotFoundException('المشوار غير موجود', ErrorCodes.RideNotFound);
     }
-    const updated = await this.prisma.rideRequest.update({
-      where: { id: rideId },
+    const unassigned = await this.prisma.rideRequest.updateMany({
+      where: {
+        id: rideId,
+        isDeleted: false,
+        status: RideRequestStatus.Assigned,
+      },
       data: {
         driverId: null,
         status: RideRequestStatus.Requested,
         assignedAt: null,
+        driverArrivedAt: null,
         updatedAt: utcNow(),
       },
+    });
+    if (unassigned.count !== 1) {
+      const current = await this.prisma.rideRequest.findFirst({
+        where: { id: rideId, isDeleted: false },
+        include: { driver: { include: { user: true, vehicle: true } } },
+      });
+      if (current?.status === RideRequestStatus.Requested && current.driverId === null) {
+        return ApiResponse.ok(this.rides.mapRide(current), 'Ride unassigned');
+      }
+      throw new AppException('Ride state changed; it can no longer be unassigned', 400, ErrorCodes.RideNotAssignable);
+    }
+    const updated = await this.prisma.rideRequest.findFirstOrThrow({
+      where: { id: rideId },
       include: { driver: { include: { user: true, vehicle: true } } },
     });
     publishRiderHistoryChange({

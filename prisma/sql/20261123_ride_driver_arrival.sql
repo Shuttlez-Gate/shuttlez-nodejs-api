@@ -1,0 +1,2 @@
+ALTER TABLE "RideRequestsSet"
+ADD COLUMN IF NOT EXISTS "DriverArrivedAt" TIMESTAMPTZ(6);
