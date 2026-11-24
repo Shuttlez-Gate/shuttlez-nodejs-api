@@ -40,6 +40,7 @@ import { FareService } from '../pricing/fare.service';
 import { SegmentInventoryService } from './segment-inventory.service';
 import { PushNotificationService } from './push-notification.service';
 import {
+  CAPTAIN_ROUTE_SEARCH_RADIUS_METERS,
   matchOriginDestination,
   remainingForRange,
   type OrderedStop,
@@ -911,7 +912,9 @@ export class CaptainRoutesService {
         continue;
       }
 
-      const matched = requested ? matchRouteToJourney(stops, query) : null;
+      const matched = requested
+        ? matchRouteToJourney(stops, query, CAPTAIN_ROUTE_SEARCH_RADIUS_METERS)
+        : null;
       if (requested && !matched) continue;
       const origin = matched?.origin ?? stops[0];
       const destination = matched?.destination ?? stops[stops.length - 1];

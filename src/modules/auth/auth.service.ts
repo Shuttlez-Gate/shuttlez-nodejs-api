@@ -1,5 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import {
+  monotonicNow,
+  recordPerformanceDiagnostic,
+} from '../../common/performance-diagnostics';
+import { Prisma, User } from '@prisma/client';
 import { AuthRateLimiter } from './auth-rate-limiter';
 import { PhoneAccountService } from './phone-account.service';
 import {
@@ -289,6 +293,8 @@ export class AuthService {
     password: string,
     ip?: string,
   ): Promise<AuthResponseDto> {
+    const registrationStartedAt = monotonicNow();
+    const preparationStartedAt = registrationStartedAt;
     const phone = normalizePhone(request.phone);
     this.rateLimit.hit(`register:${phone}`, 5, 15 * 60_000);
     if (!isRiderPasswordShape(password)) {
@@ -298,74 +304,95 @@ export class AuthService {
         'PASSWORD_WEAK',
       );
     }
-    const existing = await this.prisma.user.findFirst({
-      where: { phone, isDeleted: false },
-      select: { id: true },
+    recordPerformanceDiagnostic('registration.service_validation', {
+      durationMs: monotonicNow() - preparationStartedAt,
     });
-    if (existing) {
-      throw new AppException('رقم الهاتف مسجل بالفعل', 409, 'PHONE_ALREADY_REGISTERED');
-    }
 
+    const passwordHashStartedAt = monotonicNow();
     const passwordHash = await hashPassword(password);
+    recordPerformanceDiagnostic('registration.password_hash', {
+      durationMs: monotonicNow() - passwordHashStartedAt,
+    });
     const asDriver = isDriverRegistration(request.userType, request.client);
     const userId = newId();
     const now = utcNow();
 
+    const atomicWriteStartedAt = monotonicNow();
+    let user: User;
     try {
-      await this.prisma.$transaction(async (tx) => {
-        await tx.user.create({
-          data: {
-            id: userId,
-            phone,
-            fullName: request.fullName,
-            email: blankToNull(request.email),
-            gender: parseGender(request.gender),
-            userType: asDriver ? UserType.Driver : UserType.Passenger,
-            passwordHash,
-            firebasePhoneUid: null,
-            ...userDefaults(now),
-          },
-        });
-        await tx.wallet.create({
-          data: { id: newId(), userId, ...walletDefaults(now) },
-        });
-        if (asDriver) {
-          await tx.driver.create({
-            data: {
-              id: newId(),
-              userId,
-              verificationStatus: DriverVerificationStatus.Pending,
-              nationalId: blankToNull(request.nationalId),
-              birthDate: parseDateOnly(request.birthDate),
-              licenseNumber: blankToNull(request.licenseNumber),
-              licenseType: blankToNull(request.licenseType),
-              licenseExpiry: parseDateOnly(request.licenseExpiry),
-              vehicleKind: blankToNull(request.vehicleKind),
-              vehicleModelName: blankToNull(request.vehicleModel),
-              manufactureYear: request.manufactureYear ?? null,
-              plateNumber: blankToNull(request.plateNumber),
-              vehicleColor: blankToNull(request.vehicleColor),
-              seats: request.seats ?? null,
-              ...driverDefaults(now),
-              isActive: false,
-            },
-          });
-        }
+      user = await this.prisma.user.create({
+        data: {
+          id: userId,
+          phone,
+          fullName: request.fullName,
+          email: blankToNull(request.email),
+          gender: parseGender(request.gender),
+          userType: asDriver ? UserType.Driver : UserType.Passenger,
+          passwordHash,
+          firebasePhoneUid: null,
+          ...userDefaults(now),
+          wallet: { create: { id: newId(), ...walletDefaults(now) } },
+          ...(asDriver
+            ? {
+                driver: {
+                  create: {
+                    id: newId(),
+                    verificationStatus: DriverVerificationStatus.Pending,
+                    nationalId: blankToNull(request.nationalId),
+                    birthDate: parseDateOnly(request.birthDate),
+                    licenseNumber: blankToNull(request.licenseNumber),
+                    licenseType: blankToNull(request.licenseType),
+                    licenseExpiry: parseDateOnly(request.licenseExpiry),
+                    vehicleKind: blankToNull(request.vehicleKind),
+                    vehicleModelName: blankToNull(request.vehicleModel),
+                    manufactureYear: request.manufactureYear ?? null,
+                    plateNumber: blankToNull(request.plateNumber),
+                    vehicleColor: blankToNull(request.vehicleColor),
+                    seats: request.seats ?? null,
+                    ...driverDefaults(now),
+                    isActive: false,
+                  },
+                },
+              }
+            : {}),
+        },
+      });
+      recordPerformanceDiagnostic('registration.atomic_user_graph_write', {
+        durationMs: monotonicNow() - atomicWriteStartedAt,
+        includesDriver: asDriver,
       });
     } catch (error) {
+      recordPerformanceDiagnostic('registration.atomic_user_graph_write_failed', {
+        durationMs: monotonicNow() - atomicWriteStartedAt,
+        errorCode:
+          typeof error === 'object' && error !== null && 'code' in error
+            ? String((error as { code: unknown }).code)
+            : 'unknown',
+      });
       if (isUniqueConflict(error)) {
         throw new AppException('رقم الهاتف مسجل بالفعل', 409, 'PHONE_ALREADY_REGISTERED');
       }
       throw error;
     }
 
-    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    const tokenWriteStartedAt = monotonicNow();
     const tokens = await this.issueTokens(user, {
       ip,
       deviceId: request.deviceId,
       platform: request.platform,
     });
-    return { tokens, user: toProfileDto(user) };
+    recordPerformanceDiagnostic('registration.refresh_token_write', {
+      durationMs: monotonicNow() - tokenWriteStartedAt,
+    });
+    const profileStartedAt = monotonicNow();
+    const profile = toProfileDto(user);
+    recordPerformanceDiagnostic('registration.profile_build', {
+      durationMs: monotonicNow() - profileStartedAt,
+    });
+    recordPerformanceDiagnostic('registration.service_total', {
+      durationMs: monotonicNow() - registrationStartedAt,
+    });
+    return { tokens, user: profile };
   }
 
   async loginWithPassword(

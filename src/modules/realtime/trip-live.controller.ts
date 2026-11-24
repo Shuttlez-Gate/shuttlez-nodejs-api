@@ -1,4 +1,8 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import {
+  monotonicNow,
+  recordPerformanceDiagnostic,
+} from '../../common/performance-diagnostics';
 import { ApiResponse } from '../../common/api-response';
 import { CurrentUserService } from '../../common/current-user.service';
 import {
@@ -57,12 +61,16 @@ export class TripLiveController {
       notifyUserIds?: string[];
     },
   ) {
+    const requestStartedAt = monotonicNow();
     const userId = this.currentUser.requireUserId();
+    const tripLookupStartedAt = monotonicNow();
     const rows = await this.tripRows(tripId);
+    const tripLookupCompletedAt = monotonicNow();
     const driverUserId = rows[0]?.driverUserId ?? '';
     if (driverUserId.toLowerCase() !== userId.toLowerCase()) {
       throw new ForbiddenAppException('غير مسموح');
     }
+    const emissionStartedAt = monotonicNow();
     const progress = this.tracking.applyLive({
       tripId: rows[0].tripId,
       stopOrder: body?.stopOrder ?? 0,
@@ -72,6 +80,17 @@ export class TripLiveController {
       boardedUserIds: body?.boardedUserIds ?? [],
       boardedBookingIds: body?.boardedBookingIds ?? [],
       notifyUserIds: body?.notifyUserIds ?? [],
+    });
+    const emissionCompletedAt = monotonicNow();
+    recordPerformanceDiagnostic('trip_tracking.live_push', {
+      requestStartedAtMonotonicMs: requestStartedAt,
+      tripLookupStartedAtMonotonicMs: tripLookupStartedAt,
+      tripLookupCompletedAtMonotonicMs: tripLookupCompletedAt,
+      emissionStartedAtMonotonicMs: emissionStartedAt,
+      emissionCompletedAtMonotonicMs: emissionCompletedAt,
+      tripLookupMs: tripLookupCompletedAt - tripLookupStartedAt,
+      emissionMs: emissionCompletedAt - emissionStartedAt,
+      totalMs: emissionCompletedAt - requestStartedAt,
     });
     return ApiResponse.ok(progress);
   }

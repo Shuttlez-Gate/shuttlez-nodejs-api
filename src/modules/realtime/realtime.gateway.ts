@@ -8,6 +8,10 @@ import {
 } from '@nestjs/websockets';
 import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
+import {
+  monotonicNow,
+  recordPerformanceDiagnostic,
+} from '../../common/performance-diagnostics';
 import { PrismaService } from '../../database/prisma/prisma.service';
 import { newId } from '../../common/utils/date.util';
 import {
@@ -100,13 +104,31 @@ export class TripTrackingGateway {
 
   @SubscribeMessage('JoinTrip')
   async join(@ConnectedSocket() client: Socket, @MessageBody() body: unknown) {
+    const receivedAt = monotonicNow();
     const id = hubText(body).toLowerCase();
     if (!id) return;
+    const identityStartedAt = monotonicNow();
     const userId = await this.identity.userId(client);
-    if (!userId || !(await this.canReadTrip(id, userId))) return;
-    await client.join(`trip-${id}`);
-    await client.join(`user-${userId.toLowerCase()}`);
-    const startedAt = await this.startedAt(id);
+    const identityCompletedAt = monotonicNow();
+    const authorizationStartedAt = identityCompletedAt;
+    const access = userId ? await this.authorizeTripJoin(id, userId) : null;
+    const authorizationCompletedAt = monotonicNow();
+    if (!userId || !access) {
+      recordPerformanceDiagnostic('trip_tracking.join', {
+        allowed: false,
+        receivedAtMonotonicMs: receivedAt,
+        authorizationStartedAtMonotonicMs: authorizationStartedAt,
+        authorizationCompletedAtMonotonicMs: authorizationCompletedAt,
+        identityMs: identityCompletedAt - identityStartedAt,
+        authorizationMs: authorizationCompletedAt - authorizationStartedAt,
+        totalMs: authorizationCompletedAt - receivedAt,
+      });
+      return;
+    }
+    const roomJoinStartedAt = monotonicNow();
+    await client.join([`trip-${id}`, `user-${userId.toLowerCase()}`]);
+    const roomJoinCompletedAt = monotonicNow();
+    const startedAt = access.startedAt;
     if (startedAt) {
       client.emit('TripStarted', {
         tripId: id,
@@ -115,23 +137,44 @@ export class TripTrackingGateway {
       });
     }
     const progress = this.progressByTrip.get(id);
-    if (!progress) return;
-    client.emit('TripProgressUpdated', {
-      tripId: id,
-      stopOrder: progress.stopOrder,
-      boardedUserIds: progress.boardedUserIds,
-      boardedBookingIds: progress.boardedBookingIds,
-      notifyUserIds: progress.notifyUserIds,
-    });
-    if (progress.latitude == null || progress.longitude == null) return;
-    client.emit('DriverLocationUpdated', {
-      tripId: id,
-      latitude: progress.latitude,
-      longitude: progress.longitude,
-      heading: progress.heading ?? 0,
-      stopOrder: progress.stopOrder,
-      boardedUserIds: progress.boardedUserIds,
-      boardedBookingIds: progress.boardedBookingIds,
+    const snapshotEmitStartedAt = monotonicNow();
+    if (progress) {
+      client.emit('TripProgressUpdated', {
+        tripId: id,
+        stopOrder: progress.stopOrder,
+        boardedUserIds: progress.boardedUserIds,
+        boardedBookingIds: progress.boardedBookingIds,
+        notifyUserIds: progress.notifyUserIds,
+      });
+      if (progress.latitude != null && progress.longitude != null) {
+        client.emit('DriverLocationUpdated', {
+          tripId: id,
+          latitude: progress.latitude,
+          longitude: progress.longitude,
+          heading: progress.heading ?? 0,
+          stopOrder: progress.stopOrder,
+          boardedUserIds: progress.boardedUserIds,
+          boardedBookingIds: progress.boardedBookingIds,
+        });
+      }
+    }
+    const completedAt = monotonicNow();
+    recordPerformanceDiagnostic('trip_tracking.join', {
+      allowed: true,
+      receivedAtMonotonicMs: receivedAt,
+      authorizationStartedAtMonotonicMs: authorizationStartedAt,
+      authorizationCompletedAtMonotonicMs: authorizationCompletedAt,
+      roomJoinStartedAtMonotonicMs: roomJoinStartedAt,
+      roomJoinCompletedAtMonotonicMs: roomJoinCompletedAt,
+      snapshotEmitStartedAtMonotonicMs: snapshotEmitStartedAt,
+      completedAtMonotonicMs: completedAt,
+      identityMs: identityCompletedAt - identityStartedAt,
+      authorizationMs: authorizationCompletedAt - authorizationStartedAt,
+      roomJoinMs: roomJoinCompletedAt - roomJoinStartedAt,
+      snapshotEmitMs: completedAt - snapshotEmitStartedAt,
+      totalMs: completedAt - receivedAt,
+      hadSnapshot: Boolean(progress),
+      tripStarted: Boolean(startedAt),
     });
   }
 
@@ -264,6 +307,7 @@ export class TripTrackingGateway {
     progress: TripLiveProgress,
   ) {
     if (!this.server) return;
+    const emitStartedAt = monotonicNow();
     let room = this.server.to(`trip-${tripId}`);
     const users = new Set<string>([
       ...progress.boardedUserIds,
@@ -274,6 +318,13 @@ export class TripTrackingGateway {
       if (id) room = room.to(`user-${id}`);
     }
     room.emit(event, payload);
+    const emitCompletedAt = monotonicNow();
+    recordPerformanceDiagnostic('trip_tracking.room_emit', {
+      event,
+      emitStartedAtMonotonicMs: emitStartedAt,
+      emitCompletedAtMonotonicMs: emitCompletedAt,
+      synchronousEmitMs: emitCompletedAt - emitStartedAt,
+    });
   }
 
   private remember(tripId: string, payload: Record<string, unknown>): TripLiveProgress {
@@ -311,72 +362,69 @@ export class TripTrackingGateway {
     return next;
   }
 
-  private async startedAt(id: string): Promise<string | null> {
+  private async authorizeTripJoin(
+    tripId: string,
+    userId: string,
+  ): Promise<{ startedAt: string | null } | null> {
     try {
-      return await this.lookupStartedAt(id);
-    } catch {
-      return null;
-    }
-  }
-
-  private async lookupStartedAt(id: string): Promise<string | null> {
-    const trip = await this.prisma.trip.findFirst({
-      where: { id, isDeleted: false },
-      select: { status: true, startedAt: true },
-    });
-    if (trip) {
-      return trip.status === TripStatus.InProgress
-        ? trip.startedAt?.toISOString() ?? new Date().toISOString()
-        : null;
-    }
-    const ride = await this.prisma.rideRequest.findFirst({
-      where: { id, isDeleted: false },
-      select: { status: true, startedAt: true },
-    });
-    if (ride) {
-      return ride.status === RideRequestStatus.InProgress
-        ? ride.startedAt?.toISOString() ?? new Date().toISOString()
-        : null;
-    }
-    const group = await this.prisma.groupRequest.findFirst({
-      where: { id, isDeleted: false },
-      select: { status: true, startedAt: true },
-    });
-    if (group?.status !== GroupRequestStatus.InProgress) return null;
-    return group.startedAt?.toISOString() ?? new Date().toISOString();
-  }
-
-  private async canReadTrip(tripId: string, userId: string): Promise<boolean> {
-    try {
-      const trip = await this.prisma.trip.findFirst({
-        where: { id: tripId, isDeleted: false },
-        select: {
-          driver: { select: { userId: true } },
-          bookings: {
-            where: { isDeleted: false, status: { not: BookingStatus.Cancelled } },
-            select: { userId: true },
-          },
-        },
-      });
       const actor = userId.toLowerCase();
-      if (trip) {
-        if (trip.driver?.userId?.toLowerCase() === actor) return true;
-        return trip.bookings.some((booking) => booking.userId.toLowerCase() === actor);
+      const tripRows = await this.prisma.$queryRaw<{
+        status: number;
+        startedAt: Date | null;
+        driverUserId: string | null;
+        riderUserId: string | null;
+      }[]>`
+        SELECT t."Status" AS status,
+               t."StartedAt" AS "startedAt",
+               d."UserId" AS "driverUserId",
+               b."UserId" AS "riderUserId"
+        FROM "TripsSet" t
+        LEFT JOIN "DriversSet" d ON d."Id" = t."DriverId"
+        LEFT JOIN "BookingsSet" b
+          ON b."TripId" = t."Id"
+         AND b."IsDeleted" = false
+         AND b."Status" <> ${BookingStatus.Cancelled}
+        WHERE t."Id" = CAST(${tripId} AS uuid)
+          AND t."IsDeleted" = false
+      `;
+      if (tripRows.length > 0) {
+        const allowed =
+          tripRows[0].driverUserId?.toLowerCase() === actor ||
+          tripRows.some((booking) => booking.riderUserId?.toLowerCase() === actor);
+        if (!allowed) return null;
+        return {
+          startedAt:
+            tripRows[0].status === TripStatus.InProgress
+              ? tripRows[0].startedAt?.toISOString() ?? new Date().toISOString()
+              : null,
+        };
       }
       const ride = await this.prisma.rideRequest.findFirst({
         where: { id: tripId, isDeleted: false },
         select: {
+          status: true,
+          startedAt: true,
           riderUserId: true,
           driver: { select: { userId: true } },
         },
       });
       if (ride) {
-        if (ride.riderUserId.toLowerCase() === actor) return true;
-        return ride.driver?.userId?.toLowerCase() === actor;
+        const allowed =
+          ride.riderUserId.toLowerCase() === actor ||
+          ride.driver?.userId?.toLowerCase() === actor;
+        if (!allowed) return null;
+        return {
+          startedAt:
+            ride.status === RideRequestStatus.InProgress
+              ? ride.startedAt?.toISOString() ?? new Date().toISOString()
+              : null,
+        };
       }
       const group = await this.prisma.groupRequest.findFirst({
         where: { id: tripId, isDeleted: false },
         select: {
+          status: true,
+          startedAt: true,
           organizerUserId: true,
           driver: { select: { userId: true } },
           members: {
@@ -385,12 +433,20 @@ export class TripTrackingGateway {
           },
         },
       });
-      if (!group) return false;
-      if (group.organizerUserId.toLowerCase() === actor) return true;
-      if (group.driver?.userId?.toLowerCase() === actor) return true;
-      return group.members.some((member) => member.userId.toLowerCase() === actor);
+      if (!group) return null;
+      const allowed =
+        group.organizerUserId.toLowerCase() === actor ||
+        group.driver?.userId?.toLowerCase() === actor ||
+        group.members.some((member) => member.userId.toLowerCase() === actor);
+      if (!allowed) return null;
+      return {
+        startedAt:
+          group.status === GroupRequestStatus.InProgress
+            ? group.startedAt?.toISOString() ?? new Date().toISOString()
+            : null,
+      };
     } catch {
-      return false;
+      return null;
     }
   }
 

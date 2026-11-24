@@ -1,6 +1,7 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '@prisma/client';
+import { recordPerformanceDiagnostic } from '../../common/performance-diagnostics';
 
 @Injectable()
 export class PrismaService
@@ -15,9 +16,30 @@ export class PrismaService
     // machine. node-pg can, so queries go through that driver.
     super(
       connectionString
-        ? { adapter: new PrismaPg({ connectionString }) }
+        ? {
+            adapter: new PrismaPg({ connectionString }),
+            ...(process.env.SHUTTLEZ_PERF_DIAGNOSTICS === '1'
+              ? { log: [{ emit: 'event' as const, level: 'query' as const }] }
+              : {}),
+          }
         : undefined,
     );
+    if (process.env.SHUTTLEZ_PERF_DIAGNOSTICS === '1') {
+      const subscribeToQuery = this.$on as unknown as (
+        event: 'query',
+        callback: (event: { query: string; duration: number }) => void,
+      ) => void;
+      subscribeToQuery.call(this, 'query', (event) => {
+        const operation = /^\s*(SELECT|INSERT|UPDATE|DELETE)/i.exec(event.query)?.[1]
+          ?.toUpperCase() ?? 'QUERY';
+        const relation = /"(?:public\.)?([^"]+Set)"/.exec(event.query)?.[1] ?? 'raw';
+        recordPerformanceDiagnostic('database.prisma_query', {
+          operation,
+          relation,
+          durationMs: event.duration,
+        });
+      });
+    }
   }
 
   async onModuleInit(): Promise<void> {

@@ -1,8 +1,10 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseInterceptors } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { ApiResponse } from '../../common/api-response';
 import { AuthService } from './auth.service';
+import { monotonicNow, recordPerformanceDiagnostic } from '../../common/performance-diagnostics';
+import { RegistrationTimingInterceptor } from './registration-timing.interceptor';
 import {
   ChangePasswordRequest,
   ChangePhoneRequest,
@@ -51,9 +53,15 @@ export class AuthController {
   }
 
   @Post('register')
+  @UseInterceptors(RegistrationTimingInterceptor)
   async register(@Body() request: RegisterRequest, @Req() req: Request) {
     const result = await this.auth.register(request, clientIp(req));
-    return ApiResponse.ok(result, 'تم إنشاء الحساب بنجاح');
+    const responseBuildStartedAt = monotonicNow();
+    const response = ApiResponse.ok(result, 'تم إنشاء الحساب بنجاح');
+    recordPerformanceDiagnostic('registration.response_build', {
+      durationMs: monotonicNow() - responseBuildStartedAt,
+    });
+    return response;
   }
 
   @Post('social-login')

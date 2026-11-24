@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { UnauthorizedAppException } from '../../common/exceptions/app.exception';
 import { UserType } from '../../common/enums';
 import { AuthRateLimiter } from './auth-rate-limiter';
@@ -7,11 +8,24 @@ import { hashPassword, verifyPassword } from './password.util';
 const phone = '+201000000101';
 const password = 'Riderpass1';
 
+type PrismaMock = {
+  user: {
+    findFirst: jest.Mock;
+    findUniqueOrThrow: jest.Mock;
+    create: jest.Mock;
+    update: jest.Mock;
+  };
+  wallet: { create: jest.Mock };
+  driver: { create: jest.Mock };
+  refreshToken: { create: jest.Mock; updateMany: jest.Mock };
+  $transaction: jest.Mock;
+};
+
 function riderService(initial: Record<string, unknown> | null) {
   let user = initial;
   const revoked: Array<Record<string, unknown>> = [];
   const createdTokens: Array<Record<string, unknown>> = [];
-  const prisma: any = {
+  const prisma: PrismaMock = {
     user: {
       findFirst: jest.fn(async () => user),
       findUniqueOrThrow: jest.fn(async () => user),
@@ -79,7 +93,7 @@ function riderService(initial: Record<string, unknown> | null) {
 
 describe('rider password authentication', () => {
   it('registers with a scrypt hash and does not mark the phone as Firebase-verified', async () => {
-    const { service, readUser } = riderService(null);
+    const { service, prisma, readUser } = riderService(null);
     const result = await service.register(
       {
         phone: '01000000101',
@@ -99,6 +113,21 @@ describe('rider password authentication', () => {
     expect(result.user.hasPassword).toBe(true);
     expect(result.tokens.accessToken).toBe('access-plain');
     expect(result).not.toHaveProperty('passwordHash');
+    expect(prisma.user.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          wallet: {
+            create: expect.objectContaining({
+              id: expect.any(String),
+              currency: 'EGP',
+              balance: 0,
+            }),
+          },
+        }),
+      }),
+    );
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.user.findUniqueOrThrow).not.toHaveBeenCalled();
   });
 
   it('rejects a weak password and a duplicate phone', async () => {
@@ -115,14 +144,15 @@ describe('rider password authentication', () => {
       ),
     ).rejects.toMatchObject({ code: 'PASSWORD_WEAK' });
 
-    const existing = riderService({
-      id: 'user-1',
-      phone,
-      isDeleted: false,
-      passwordHash: null,
-    });
+    const duplicate = riderService(null);
+    duplicate.prisma.user.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('duplicate phone', {
+        code: 'P2002',
+        clientVersion: 'test',
+      }),
+    );
     await expect(
-      existing.service.register(
+      duplicate.service.register(
         {
           phone,
           fullName: 'راكب تجريبي',

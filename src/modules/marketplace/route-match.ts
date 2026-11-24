@@ -95,7 +95,8 @@ export function journeyRequested(query: JourneyQuery): boolean {
 
 /**
  * Origin must match an earlier stop than destination.
- * Coordinates use the existing 600m stop radius.
+ * An explicit radius applies independently to both coordinate endpoints.
+ * Without one, coordinates retain the strict and preview fallback radii.
  * Names are used only when coordinates were not sent, and both ends must match.
  */
 /**
@@ -122,10 +123,14 @@ export function matchPreviewStops(
 export function matchRouteToJourney(
   stops: OrderedStop[],
   query: JourneyQuery,
+  radiusMeters?: number,
 ): { origin: OrderedStop; destination: OrderedStop } | null {
   const ordered = [...stops].sort((a, b) => a.order - b.order);
   if (ordered.length < 2) return null;
   if (hasJourneyCoordinates(query)) {
+    if (radiusMeters !== undefined) {
+      return matchStopsByRadius(ordered, query, radiusMeters);
+    }
     return matchStopsByRadius(ordered, query, MATCH_RADIUS_METERS)
       ?? matchStopsByRadius(ordered, query, PREVIEW_MATCH_RADIUS_METERS);
   }

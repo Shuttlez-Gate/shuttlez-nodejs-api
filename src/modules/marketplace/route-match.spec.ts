@@ -1,4 +1,9 @@
-import { remainingForRange, type OrderedStop, type SegmentSeatRow } from './segment-occupancy';
+import {
+  CAPTAIN_ROUTE_SEARCH_RADIUS_METERS,
+  remainingForRange,
+  type OrderedStop,
+  type SegmentSeatRow,
+} from './segment-occupancy';
 import { isSelfOwnedTrip } from './self-booking';
 import { matchPreviewStops, matchRouteToJourney } from './route-match';
 
@@ -91,6 +96,62 @@ describe('captain route matching', () => {
     });
     expect(match?.origin.id).toBe('mataria');
     expect(match?.destination.id).toBe('nasr');
+  });
+
+  it('matches both requested endpoints within the 1500m captain search radius', () => {
+    const stops: OrderedStop[] = [
+      { id: 'pickup', order: 0, name: 'Pickup', latitude: 30, longitude: 31 },
+      { id: 'dropoff', order: 1, name: 'Dropoff', latitude: 30.1, longitude: 31.1 },
+    ];
+    const match = matchRouteToJourney(
+      stops,
+      {
+        fromLatitude: 30.012,
+        fromLongitude: 31,
+        toLatitude: 30.112,
+        toLongitude: 31.1,
+      },
+      CAPTAIN_ROUTE_SEARCH_RADIUS_METERS,
+    );
+
+    expect(match?.origin.id).toBe('pickup');
+    expect(match?.destination.id).toBe('dropoff');
+  });
+
+  it('rejects the match when either endpoint is outside 1500m', () => {
+    const match = matchRouteToJourney(
+      [
+        { id: 'pickup', order: 0, name: 'Pickup', latitude: 30, longitude: 31 },
+        { id: 'dropoff', order: 1, name: 'Dropoff', latitude: 30.1, longitude: 31.1 },
+      ],
+      {
+        fromLatitude: 30.012,
+        fromLongitude: 31,
+        toLatitude: 30.116,
+        toLongitude: 31.1,
+      },
+      CAPTAIN_ROUTE_SEARCH_RADIUS_METERS,
+    );
+
+    expect(match).toBeNull();
+  });
+
+  it('requires the destination stop to come after the pickup stop', () => {
+    const match = matchRouteToJourney(
+      [
+        { id: 'pickup', order: 0, name: 'Pickup', latitude: 30, longitude: 31 },
+        { id: 'dropoff', order: 1, name: 'Dropoff', latitude: 30.1, longitude: 31.1 },
+      ],
+      {
+        fromLatitude: 30.1,
+        fromLongitude: 31.1,
+        toLatitude: 30,
+        toLongitude: 31,
+      },
+      CAPTAIN_ROUTE_SEARCH_RADIUS_METERS,
+    );
+
+    expect(match).toBeNull();
   });
 
   it('books only the selected trip instance', () => {
